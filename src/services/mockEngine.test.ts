@@ -338,7 +338,11 @@ describe('US-03 rejecting an offer', () => {
     expect(visitOf(state, v3).status).toBe('Assigned')
   })
 
-  it('a later dispatch trigger can still offer the rejected visit to the same associate, once eligible through a separate event', () => {
+  it('contract v5: an unrelated later event never bounces the visit back to its own last rejecter', () => {
+    // This supersedes an earlier (wrong) assumption that a one-shot
+    // exclusion was enough: it is not - the very next unrelated dispatch
+    // could still have hit this same associate. The exclusion must be a
+    // property of the visit itself, checked by every dispatch the same way.
     const state = session()
     const v1 = arrive(state, 1, 'evt_1') // -> A
     const v2 = arrive(state, 2, 'evt_2') // -> B
@@ -347,36 +351,119 @@ describe('US-03 rejecting an offer', () => {
     const assignmentId = assignmentIdOf(state, v1)
 
     engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId }, at(4))
-    expect(visitOf(state, v1).status).toBe('Waiting') // the one-shot exclusion applies here
+    expect(visitOf(state, v1).status).toBe('Waiting')
 
-    // B's own, unrelated acceptance is a separate dispatch trigger - A (now
-    // long past the moment of their own reject) is a completely normal
-    // candidate again, and is in fact the only one eligible.
+    // B's own, unrelated acceptance frees B for new work ("Second UP") -
+    // a completely separate dispatch trigger from A's earlier reject.
     accept(state, v2, 5)
 
+    // v1 goes to B, never back to A - A is excluded for *this visit*
+    // specifically, no matter what later event triggers the dispatch.
     const visit = visitOf(state, v1)
     expect(visit.status).toBe('Assigned')
     const newAssignment = snap(state).assignments.find((asg) => asg.assignmentId === visit.assignmentId)
-    expect(newAssignment?.participantId).toBe(a)
+    expect(newAssignment?.participantId).not.toBe(a)
   })
 
-  it('a later arrival also stays Waiting behind the rejected visit, which keeps FIFO priority by its original order', () => {
+  it('a newer arrival with no rejection history can be served while the rejected visit keeps waiting for someone else', () => {
+    // The exclusion is scoped to the rejected visit, not global: A remains
+    // a completely normal candidate for every *other* visitor right away.
     const state = session()
     const v1 = arrive(state, 1, 'evt_1') // -> A
     arrive(state, 2, 'evt_2') // -> B
     arrive(state, 3, 'evt_3') // -> C
-    const v4 = arrive(state, 4, 'evt_4') // Waiting: everyone already offered
+    const a = snap(state).assignments[0].participantId
     const assignmentId = assignmentIdOf(state, v1)
 
-    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId }, at(5))
-
-    // Nobody is eligible for v1 (A excluded, B/C still pending), so it
-    // stays Waiting - at its original, oldest registration order, ahead
-    // of v4 whenever a slot does open up.
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId }, at(4))
     expect(visitOf(state, v1).status).toBe('Waiting')
-    expect(visitOf(state, v1).waitingPosition).toBe(1)
+
+    // B and C are still mid-offer; A is free again but excluded for v1
+    // specifically - so a brand new arrival (no history with A) goes to A,
+    // while v1 keeps waiting for B or C to resolve instead.
+    const v4 = arrive(state, 5, 'evt_4')
+
+    expect(visitOf(state, v4).status).toBe('Assigned')
+    const v4Assignment = snap(state).assignments.find((asg) => asg.visitId === v4)
+    expect(v4Assignment?.participantId).toBe(a)
+    expect(visitOf(state, v1).status).toBe('Waiting')
+    // A took v4, so every associate now holds a pending offer again - from
+    // v1's perspective that is indistinguishable from the ordinary
+    // everyone's-busy case, not "only my rejecter is in the way".
+    expect(visitOf(state, v1).waitingReason).toBe('AwaitingConfirmation')
+  })
+
+  it('settles every offer a single reject makes possible, not just one - confirmed live against the backend', () => {
+    // A single mutation can free one associate directly, but under the
+    // per-visit exclusion rule that alone can also reveal a *second*,
+    // independently-idle-but-excluded associate as newly eligible for a
+    // different Waiting visit - so one dispatch call per command is not
+    // enough; settleDispatch must loop. This exact cascade (one reject
+    // producing two new offers) was observed against the live backend
+    // (contract v5, 20261028000300_skip_last_rejecter.sql) before being
+    // reproduced here.
+    const state = session()
+    arrive(state, 1, 'evt_1') // -> A
+    const v2 = arrive(state, 2, 'evt_2') // -> B
+    const v3 = arrive(state, 3, 'evt_3') // -> C
+    const v4 = arrive(state, 4, 'evt_4') // Waiting: everyone already offered
+
+    // B rejects V2: only B is free, so V4 (the only visit not excluding B)
+    // is the one offer this produces.
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId: assignmentIdOf(state, v2) }, at(5))
+    expect(visitOf(state, v4).status).toBe('Assigned')
+    const bId = snap(state).assignments.find((asg) => asg.visitId === v4)?.participantId
+    expect(visitOf(state, v2).status).toBe('Waiting') // V2 excludes B itself; nobody else is free
+
+    // B (now holding V4) rejects it too: B is free again but excluded from
+    // both V2 and V4, so neither can be offered to B - no dispatch happens.
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId: assignmentIdOf(state, v4) }, at(6))
+    expect(visitOf(state, v2).status).toBe('Waiting')
     expect(visitOf(state, v4).status).toBe('Waiting')
-    expect(visitOf(state, v4).waitingPosition).toBe(2)
+
+    // C rejects V3: this frees C directly, who takes the older Waiting
+    // visit (V2). But that single reject *also* leaves B newly eligible
+    // for V3 (B was already idle, just excluded from V2 and V4, not V3) -
+    // a second offer the same settle pass must also make.
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId: assignmentIdOf(state, v3) }, at(7))
+    expect(visitOf(state, v2).status).toBe('Assigned')
+    const cId = snap(state).assignments.find((asg) => asg.assignmentId === visitOf(state, v2).assignmentId)?.participantId
+    expect(cId).not.toBe(bId)
+    expect(visitOf(state, v3).status).toBe('Assigned')
+    expect(snap(state).assignments.find((asg) => asg.assignmentId === visitOf(state, v3).assignmentId)?.participantId).toBe(bId)
+
+    // V4 is left exactly where the live sweep found it: Waiting, but now
+    // for the ordinary reason - every associate is busy again.
+    expect(visitOf(state, v4).status).toBe('Waiting')
+    expect(visitOf(state, v4).waitingReason).toBe('AwaitingConfirmation')
+  })
+
+  it('the exclusion moves to whoever rejects next, freeing the first rejecter for this same visit', () => {
+    // Backend contract v5 example: after A rejects V1 and it is later
+    // re-offered to and rejected by B, A must be eligible for V1 again -
+    // the exclusion names only the most recent rejecter, not everyone who
+    // has ever rejected it. C is taken off the floor and there is only
+    // ever one visit, so the only two candidates (A, B) trade this single
+    // offer back and forth with nothing else for either of them to do.
+    const state = session()
+    const cId = snap(state).associates[2].participantId
+    engine.setAvailability(state, { sessionId: state.sessionId, participantId: cId, commandId: 'cmd_off', state: 'OffFloor' }, at(1))
+    const v1 = arrive(state, 2, 'evt_1') // -> A (B is idle, off-floor C is not a candidate)
+    const aId = snap(state).assignments[0].participantId
+
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId: assignmentIdOf(state, v1) }, at(3))
+    const afterFirstReject = visitOf(state, v1)
+    expect(afterFirstReject.status).toBe('Assigned') // B was idle and not excluded, so it goes straight to B
+    const bId = snap(state).assignments.find((asg) => asg.assignmentId === afterFirstReject.assignmentId)?.participantId
+    expect(bId).not.toBe(aId)
+
+    // B now rejects this same visit - the exclusion moves to B, and A
+    // (excluded no more, and still idle) becomes eligible for it again.
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId: assignmentIdOf(state, v1) }, at(4))
+    const visit = visitOf(state, v1)
+    expect(visit.status).toBe('Assigned')
+    const newAssignment = snap(state).assignments.find((asg) => asg.assignmentId === visit.assignmentId)
+    expect(newAssignment?.participantId).toBe(aId)
   })
   it('keeps the full history across repeated rejects; assignmentId always points at the live one', () => {
     // Confirmed against the backend's own implementation: a visit may carry

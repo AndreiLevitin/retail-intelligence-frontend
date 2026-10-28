@@ -169,19 +169,34 @@ identical precondition to `canAcceptUp`).
   that was already Waiting.
 * Rejecting never moves the rejecting associate's queue itself — that
   already happened at offer time, same as Accept — but it does clear
-  their `pendingAssignmentId`, making them eligible again. **Correction,
-  same day:** the one dispatch this triggers excludes the rejecting
-  associate for that single attempt. If someone *else* is eligible, the
-  visit is re-offered to them right away; if the rejecter was the only
-  technically-eligible one, the visit stays `Waiting` — treated exactly as
-  if it had arrived at a moment when everyone was busy, never looped
-  straight back to the person who just declined it. This was flagged by
-  the user as bad UX after the first version shipped (which, like a
-  pending-offer departure, *did* hand it right back) and is now a
-  one-shot exclusion in `tryCreateOffer`'s `excludeParticipantId`, not a
-  lasting block — any later, separately-triggered dispatch (a new
-  arrival, someone else's accept/reject/departure, an availability
-  change) considers that associate normally again.
+  their `pendingAssignmentId`, making them eligible again. **Contract v5
+  (current):** a visit persistently excludes its own most recent
+  rejecter, and only that one associate, from being offered *that
+  specific visit* again — not a one-shot exception on the single dispatch
+  the reject triggers, which was an earlier, insufficient version of this
+  fix. The exclusion is a property of the visit (derived from its own
+  assignment history via `lastRejecterOf`, no extra state), so it holds no
+  matter what later, unrelated event triggers the next dispatch — a new
+  arrival, someone else's accept/reject/departure, an availability change.
+  It moves to whoever rejects the visit next, and is lifted the moment a
+  *different* associate rejects it; the first rejecter never acquires any
+  exclusion from any other visitor's dispatch. `tryCreateOffer` scans
+  Waiting visits oldest-first and offers the first one it can to its
+  first eligible, non-excluded associate, skipping (not blocking) a visit
+  stuck behind its own specific exclusion so a newer, unblocked visit can
+  still be served ahead of it; `settleDispatch` then calls it in a loop
+  until no further offer is possible, since one mutation can make more
+  than one new offer possible under this rule (see the live-verified
+  cascade below). `VisitView.waitingReason` (`NoAvailableAssociates` /
+  `AwaitingConfirmation` / `AwaitingOtherAssociate`) is computed
+  server-side from the same logic and exposed per visit — see
+  `waitingReasonOf` in `mockEngine.ts` and `waitingReasonLabels` in
+  `lib/labels.ts`. This was flagged twice by the user: first that the
+  original fallback looped the offer straight back to the associate who
+  just declined it (fixed by a one-shot exclusion), then — identified by
+  the backend during pre-implementation review of that fix — that the
+  one-shot version still let the very next *unrelated* dispatch bounce the
+  visit back to the same rejecter, which contract v5 closes.
 * `VisitView.assignmentId` is `null` whenever `status` is `Waiting`. This
   was always true before Reject existed (a Waiting visit never had any
   assignment history), but Reject introduces the first path *back* to
@@ -254,7 +269,7 @@ offline state and recovery. **Reset Demo** works in every scenario.
 | US-02 Register manually | `VisitorForm` create mode, `eventId` idempotency, server-set `arrivedAt`/order, Manual + NotRequested, profile-only correction via edit mode |
 | US-03 Accept, reject and complete | `Accept UP` and `Reject UP` side by side for a pending assignment only; `Sale` / `No-Sale` for an accepted unfinished turn; Reject returns the Visit to Waiting at its original order and re-dispatches excluding the rejecter (never loops back to them); Completed stays Inside |
 | US-04 Register departure | `ExitDialog`: requires a missing result, preserves an existing one read-only; Waiting visitors can leave unassigned |
-| US-05 Availability and waiting | `AssociatesTable` Off Floor blocked only for the pending-offer owner, bottom-of-queue return, the two-reason Waiting explanation, the one-offer gate itself |
+| US-05 Availability and waiting | `AssociatesTable` Off Floor blocked only for the pending-offer owner, bottom-of-queue return, the server-computed `waitingReason` (three reasons, including the last-rejecter exclusion), the one-offer gate itself |
 | US-06 Reset | `ResetDialog` destructive confirmation, mutations blocked, old snapshots discarded, new board loads at zero |
 
 `npm test` covers these transitions directly against the mock engine
@@ -262,18 +277,21 @@ plus a render smoke check of the app tree.
 
 ## Remaining API integration work
 
-**Reject UP's dispatch fallback was corrected again after going live - the
-sweep below is now stale for one specific case and needs redoing once the
-backend applies the same fix.** `POST /api/assignments/{id}/reject`
-(contract v4, `20261028000200_reject_up.sql`) matched this frontend's
-design and was verified live, including the exact case the user then
-flagged as bad UX: when the rejecting associate was the only
-technically-eligible one, the dispatch handed the same visit right back to
-them. The user asked for the visit to stay `Waiting` instead (treated as a
-fresh arrival while everyone was busy) - see `tryCreateOffer`'s
-`excludeParticipantId` and the corrected `Assignment Rotation
-Revision.md` rule 11. Of the four invariants confirmed below, only #3
-changed:
+**Reject UP's dispatch rule went through two corrections after going
+live, and is now on contract v5 end to end.** `POST
+/api/assignments/{id}/reject` was first verified against contract v4
+(`20261028000200_reject_up.sql`); that version was then found by the user
+to loop a rejected visit straight back to the same associate when they
+were the only technically-eligible one. A first fix added a one-shot
+exclusion for just the dispatch the reject itself triggers; the backend
+then identified during pre-implementation review that this was still
+insufficient — the very next *unrelated* dispatch (a new arrival, someone
+else's accept/reject) could still bounce the visit back to that associate.
+Contract v5 (`20261028000300_skip_last_rejecter.sql`) replaces the
+one-shot exclusion with a persistent per-visit "last rejecter" exclusion
+and adds the server-computed `VisitView.waitingReason` field — see the
+Reject UP section above and `Assignment Rotation Revision.md` rule 11. Of
+the four invariants below, only #3 changed across all three versions:
 
 1. A visit can carry any number of `Rejected` assignments plus at most one
    other (pending/accepted/completed-via-outcome). `BoardSnapshot.assignments`
@@ -281,31 +299,49 @@ changed:
    (non-rejected) one and is `null` while `Waiting`. **Unaffected.**
 2. `assignedTurns` counts rejected offers; `acceptedTurns` does not.
    **Unaffected.**
-3. ~~The rejecting associate is immediately eligible again... re-offered
-   right back to the same associate~~ **superseded:** the immediate
-   dispatch excludes the rejecter for that one attempt. If someone else is
-   eligible, re-offer proceeds as before; if the rejecter was the only
-   one, the visit now stays `Waiting` instead.
+3. The visit is never offered back to its own most recent rejecter: it
+   goes to another eligible associate right away, or stays `Waiting`
+   (`waitingReason: 'AwaitingOtherAssociate'`) until someone else is
+   eligible, while the rejecter keeps receiving other visitors normally.
+   The exclusion is scoped to that one visit and moves to whoever rejects
+   it next.
 4. A departure after a rejection closes only the live assignment; rejected
    history is untouched. **Unaffected.**
 
-**Verified live before this correction** (needs re-running case 2 below
-once the backend has the matching fix): `POST .../reject` with other
-associates untouched correctly re-offered to the next eligible one in
-queue order (unaffected by this correction, still valid); 409
-`INVALID_TRANSITION` both ways (rejecting an already-accepted assignment,
-accepting an already-rejected one, both unaffected); a replay on an
-already-closed assignment returned the Visit's current status
-(unaffected); CORS preflight, stale-session and not-found shapes on
-`/reject` (unaffected). **Case 2 - all three simultaneously holding their
-own offer, then one rejects - was verified against the *old* fallback
-behavior** (it came back `Assigned` to the same associate) and must be
-re-verified to confirm it now stays `Waiting` instead, once the backend
-ships the matching change.
+**Verified live against contract v5** (`feature/11-reject-skip-last-rejecter`,
+commit `cba5f2e`, migration `20261028000300_skip_last_rejecter.sql`
+applied): reset for a clean fixture, then with V1/V2/V3 all pending on
+A/B/C (Alex/Jamie/Morgan) and V4 Waiting, rejecting V2 (on Jamie) returned
+the Visit to `Waiting` with `waitingReason: 'AwaitingConfirmation'` and
+immediately dispatched **V4 to Jamie** (not V2 back to Jamie) — confirming
+the dispatcher serves the oldest Waiting visit with an eligible associate
+*other than its own last rejecter*, skipping V2 rather than blocking
+behind it. Rejecting Jamie's new V4 offer next left both V2 and V4
+`Waiting` with `waitingReason: 'AwaitingOtherAssociate'`: Jamie was idle
+again but excluded from both, and nobody else was free.
 
-Demo reset to clean afterward; `.env.local` stayed on `http` throughout
-(nothing to revert - `/reject` just stopped 404ing once the backend
-deployed it).
+Rejecting Morgan's V3 assignment then surfaced a real gap in this
+frontend's own mock, not the backend: the single `/reject` call returned
+V3 itself as `Assigned` again, and the full board showed **two** new
+offers from that one mutation — V2 to Morgan (the one directly freed by
+the reject) and V3 to Jamie (already idle, but newly eligible now that
+V3's own exclusion was Morgan, not Jamie). `mockEngine.ts`'s
+`tryCreateOffer` only ever created one offer per call, on the documented
+(and, until this sweep, untested) assumption that a single mutation could
+only ever make one new offer possible — true under the old rules, false
+under contract v5's per-visit exclusion, where freeing one associate can
+indirectly reveal a second, independently-idle-but-excluded one as
+eligible for a different visit. Fixed by replacing every direct
+`tryCreateOffer` call site with a `settleDispatch` loop that keeps
+calling it until no further offer is possible, and added a dedicated
+regression test reproducing this exact trace. 409 `INVALID_TRANSITION`
+both ways (rejecting an already-accepted assignment, accepting an
+already-rejected one) and a replay on an already-closed assignment
+returning the Visit's current status were unaffected and reconfirmed.
+CORS preflight, stale-session and not-found shapes on `/reject`
+unaffected.
+
+Demo reset to clean afterward; `.env.local` stayed on `http` throughout.
 
 **Verified end-to-end against the per-associate rotation fix (contract
 v3)**, locally, after the backend's second migration pass

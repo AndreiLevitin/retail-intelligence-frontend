@@ -15,7 +15,7 @@ import { actionKeys, useBoard } from '../../hooks/useBoard.ts'
 import { formatTimeWithSeconds } from '../../lib/format.ts'
 import { buildVisitRows } from '../../lib/selectors.ts'
 import type { VisitRow } from '../../lib/selectors.ts'
-import type { AvailabilityState, BoardSnapshot, Outcome, VisitorAttributes } from '../../lib/types.ts'
+import type { AvailabilityState, Outcome, VisitorAttributes } from '../../lib/types.ts'
 import { boardService, boardServiceMode, mockController } from '../../services/index.ts'
 import type { ScenarioId } from '../../services/mockScenarios.ts'
 
@@ -47,9 +47,6 @@ export function DashboardPage() {
 
   /** The visit/assignment/associate join lives in one selector, not in rows. */
   const visitRows = useMemo<VisitRow[]>(() => (snapshot === null ? [] : buildVisitRows(snapshot)), [snapshot])
-
-  /** Explains a Waiting visit with no assignment, from the current snapshot. */
-  const waitingExplanation = useMemo(() => (snapshot === null ? null : explainWaiting(snapshot)), [snapshot])
 
   /** Always the live row, so an open dialog follows server state. */
   const activeRow = useMemo<VisitRow | null>(() => {
@@ -157,7 +154,6 @@ export function DashboardPage() {
         errorMessage={board.loadError?.message}
         mutationsBlocked={mutationsBlocked}
         isPending={board.isPending}
-        waitingExplanation={waitingExplanation}
         onAccept={(row) => {
           if (row.visit.assignmentId === null) return
           void board.acceptUp(row.visit.visitId, row.visit.assignmentId)
@@ -232,21 +228,4 @@ export function DashboardPage() {
       ) : null}
     </div>
   )
-}
-
-/**
- * A Waiting visit has no assignment for exactly one of two reasons: nobody
- * is Available at all, or every Available associate already holds their own
- * unconfirmed offer (each associate allows at most one at a time, but
- * different associates can each hold one in parallel - there is no
- * session-wide gate). Accepted, unfinished work is never a reason - it
- * does not make an associate ineligible, so it must never be implied here.
- */
-function explainWaiting(snapshot: BoardSnapshot): string | null {
-  const available = snapshot.associates.filter((associate) => associate.state === 'Available')
-  if (available.length === 0) return 'No available associates.'
-  if (available.every((associate) => associate.pendingAssignmentId !== null)) {
-    return 'Every available associate already has an offer pending confirmation.'
-  }
-  return null
 }

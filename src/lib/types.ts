@@ -55,6 +55,14 @@ export type AttributesSource = (typeof AttributesSources)[number]
 export const EnrichmentStatuses = ['Pending', 'Complete', 'Failed', 'NotRequested'] as const
 export type EnrichmentStatus = (typeof EnrichmentStatuses)[number]
 
+/**
+ * Why a Waiting visit has no assignment. Computed server-side (contract v5)
+ * since the third reason needs the visit's rejection history, and the
+ * project's own rule is that authoritative queue logic never lives in React.
+ */
+export const WaitingReasons = ['NoAvailableAssociates', 'AwaitingConfirmation', 'AwaitingOtherAssociate'] as const
+export type WaitingReason = (typeof WaitingReasons)[number]
+
 export const ActivityKinds = [
   'ArrivalRecorded',
   'AssignmentCreated',
@@ -122,6 +130,14 @@ export interface VisitView {
   outcomeRecordedAt: string | null
   /** 1-based FIFO rank among Waiting visitors still inside; otherwise null. */
   waitingPosition: number | null
+  /**
+   * Non-null only while `status` is `Waiting` and the visitor is inside.
+   * `AwaitingOtherAssociate` means the only otherwise-eligible associate(s)
+   * rejected this specific visit most recently - excluded for this visit
+   * only, until someone else also rejects it (see Assignment Rotation
+   * Revision.md rule 11/contract v5).
+   */
+  waitingReason: WaitingReason | null
   /**
    * Null whenever status is `Waiting` - including after a Reject, which
    * returns a visit to Waiting but leaves a closed assignment in its

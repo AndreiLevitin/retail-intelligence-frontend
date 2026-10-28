@@ -15,6 +15,7 @@ import {
   presenceTones,
   visitStatusLabels,
   visitStatusTones,
+  waitingReasonLabels,
 } from '../../lib/labels.ts'
 import { canAcceptUp, canMarkExit, canRecordOutcome, canRejectUp, presenceOf } from '../../lib/types.ts'
 import type { VisitRow } from '../../lib/selectors.ts'
@@ -45,8 +46,6 @@ interface VisitorsTableProps {
   /** True while a reset is in flight: every row action is blocked. */
   mutationsBlocked: boolean
   isPending: (key: string) => boolean
-  /** Why a Waiting visit has no assignment right now. */
-  waitingExplanation: string | null
   onAccept: (row: VisitRow) => void
   onReject: (row: VisitRow) => void
   onRecordOutcome: (row: VisitRow, outcome: Outcome) => void
@@ -67,7 +66,6 @@ export function VisitorsTable({
   errorMessage,
   mutationsBlocked,
   isPending,
-  waitingExplanation,
   onAccept,
   onReject,
   onRecordOutcome,
@@ -143,9 +141,9 @@ export function VisitorsTable({
           return (
             <div className="flex flex-col gap-0.5">
               <span className="text-muted">None</span>
-              {visit.status === 'Waiting' && waitingExplanation !== null ? (
+              {visit.waitingReason !== null ? (
                 <span className="text-label text-muted">
-                  {waitingExplanation}
+                  {waitingReasonLabels[visit.waitingReason]}
                   {visit.waitingPosition !== null ? ` (position ${visit.waitingPosition})` : ''}
                 </span>
               ) : null}
@@ -253,7 +251,7 @@ export function VisitorsTable({
         ),
       },
     ],
-    [isPending, mutationsBlocked, onAccept, onEditAttributes, onMarkExit, onReject, onRecordOutcome, waitingExplanation],
+    [isPending, mutationsBlocked, onAccept, onEditAttributes, onMarkExit, onReject, onRecordOutcome],
   )
 
   const filtered = filteredRows.length !== rows.length

@@ -11,6 +11,7 @@ import type {
   Outcome,
   VisitorAttributes,
   VisitStatus,
+  WaitingReason,
 } from './types.ts'
 
 export type Tone = 'success' | 'warning' | 'danger' | 'info' | 'neutral' | 'muted'
@@ -88,6 +89,13 @@ export function outcomeTone(outcome: Outcome | null): Tone {
   if (outcome === 'Sale') return 'success'
   if (outcome === 'NoSale') return 'neutral'
   return 'muted'
+}
+
+/** Server-computed reason text for a Waiting visit with no assignment. */
+export const waitingReasonLabels: Record<WaitingReason, string> = {
+  NoAvailableAssociates: 'No available associates.',
+  AwaitingConfirmation: 'Every available associate already has an offer pending confirmation.',
+  AwaitingOtherAssociate: 'Waiting for a different associate - the only one available just declined this visitor.',
 }
 
 export const activityKindLabels: Record<ActivityKind, string> = {

@@ -22,9 +22,13 @@
  *  - rejecting a still-pending offer closes it (reason Rejected) the same
  *    way, except the Visit returns to Waiting (not Completed) at its
  *    original registration order, and a dispatch is attempted immediately
- *    - but never back to the associate who just rejected: if nobody *else*
- *      is eligible, the visit stays Waiting, exactly as if it had arrived
- *      while everyone was busy, rather than looping back to the same person
+ *  - contract v5: a visit excludes its own most recent rejecter, and only
+ *    that one associate, for *itself* - not a one-shot dispatch exception,
+ *    a property of the visit, checked by every dispatch the same way, so a
+ *    later unrelated event can never bounce the same visit back to them.
+ *    The exclusion moves to whoever rejects it next; it is lifted as soon
+ *    as a different associate rejects, and the first rejecter never
+ *    acquires any exclusion from any *other* visitor's dispatch
  *
  * The rules live here and not in components, so they exist in exactly one
  * place and can be deleted together with the mock adapter. Only arrival
@@ -50,6 +54,7 @@ import type {
   VisitorAttributes,
   VisitStatus,
   VisitView,
+  WaitingReason,
 } from '../lib/types.ts'
 
 /** Predefined roster. Survives Reset Demo; only the demo session is cleared. */
@@ -233,12 +238,25 @@ function latestAssignmentOfVisit(state: MockState, visitId: string): MockAssignm
 }
 
 /**
- * Available AND not already holding their own unconfirmed offer. Accepted,
- * unfinished work does not exclude a participant. `excludeParticipantId` is
- * a one-shot exclusion for the single dispatch attempt right after a
- * reject - see `tryCreateOffer`.
+ * The participantId of this visit's most recent Rejected assignment, if
+ * any - derived from history already kept, no separate state. This is the
+ * one associate excluded from a new offer *for this visit specifically*
+ * (contract v5 / Assignment Rotation Revision.md rule 11): if a different
+ * associate rejects it afterward, the exclusion moves to them instead.
  */
-function eligibleParticipants(state: MockState, excludeParticipantId?: string): MockParticipant[] {
+function lastRejecterOf(state: MockState, visitId: string): string | undefined {
+  const rejections = state.assignments.filter((a) => a.visitId === visitId && a.completionReason === 'Rejected')
+  return rejections.length > 0 ? rejections[rejections.length - 1].participantId : undefined
+}
+
+/**
+ * Available AND not already holding their own unconfirmed offer. Accepted,
+ * unfinished work does not exclude a participant. Eligibility is scoped to
+ * one visit: `excludeParticipantId` (that visit's own last rejecter, if
+ * any) is excluded *for this visit only* - the same associate remains a
+ * completely normal candidate for every other visitor right away.
+ */
+function eligibleParticipantsFor(state: MockState, excludeParticipantId: string | undefined): MockParticipant[] {
   return state.participants
     .filter(
       (p) =>
@@ -272,51 +290,64 @@ function queueRanks(state: MockState): Map<string, number> {
 }
 
 /**
- * Offers the oldest Waiting visit to the front-of-queue eligible participant
- * (Available, not already holding their own unconfirmed offer). The offer
- * reserves that participant and moves them to the back of the queue right
- * away, optimistically assuming they will confirm - Accept does not move
- * the queue again. Returns true when an offer was created.
+ * Offers the oldest *dispatchable* Waiting visit to its own front-of-queue
+ * eligible participant. "Dispatchable" is visit-specific, not global: a
+ * visit excludes only its own last rejecter (see `lastRejecterOf`), so an
+ * older visit stuck behind that one exclusion is skipped - keeping its
+ * FIFO place - while a newer visit with no such history can still be
+ * served in the same pass. The offer reserves that participant and moves
+ * them to the back of the queue right away, optimistically assuming they
+ * will confirm - Accept does not move the queue again. Returns true when
+ * an offer was created.
  *
- * `excludeParticipantId`: the one dispatch attempt that runs immediately
- * after a Reject must not hand the same visit right back to the associate
- * who just declined it - confirmed with the user: when nobody *else* is
- * eligible, the visit should stay Waiting, exactly as if it had arrived at
- * a moment when everyone was busy, not loop back to the same person. This
- * is a one-shot exclusion for this single call, not a lasting block - any
- * later dispatch (a new arrival, someone else's accept/reject/departure,
- * an availability change) considers that associate normally again.
+ * Only tries the single oldest Waiting visit it can actually place, not a
+ * full settle pass - callers must loop (`settleDispatch`) until this
+ * returns false. One call is not enough under the per-visit exclusion
+ * rule: freeing one participant can satisfy the oldest Waiting visit, and
+ * that alone can reveal a second, independently-idle-but-excluded
+ * participant as newly eligible for a different visit - confirmed live
+ * against the backend, where a single reject produced two new offers in
+ * one mutation.
  */
-function tryCreateOffer(state: MockState, at: string, excludeParticipantId?: string): boolean {
-  const visit = state.visits
+function tryCreateOffer(state: MockState, at: string): boolean {
+  const waitingVisits = state.visits
     .filter((v) => v.status === 'Waiting' && v.departedAt === null)
-    .sort((a, b) => a.registrationOrder - b.registrationOrder)[0]
-  if (visit === undefined) return false
+    .sort((a, b) => a.registrationOrder - b.registrationOrder)
 
-  const participant = eligibleParticipants(state, excludeParticipantId)[0]
-  if (participant === undefined) return false
+  for (const visit of waitingVisits) {
+    const participant = eligibleParticipantsFor(state, lastRejecterOf(state, visit.visitId))[0]
+    if (participant === undefined) continue // this one is stuck; try the next oldest
 
-  const assignment: MockAssignment = {
-    assignmentId: nextId(state, 'asg'),
-    visitId: visit.visitId,
-    participantId: participant.participantId,
-    assignedAt: at,
-    acceptedAt: null,
-    completedAt: null,
-    completionReason: null,
+    const assignment: MockAssignment = {
+      assignmentId: nextId(state, 'asg'),
+      visitId: visit.visitId,
+      participantId: participant.participantId,
+      assignedAt: at,
+      acceptedAt: null,
+      completedAt: null,
+      completionReason: null,
+    }
+    state.assignments.push(assignment)
+    participant.assignedTurns += 1
+    visit.status = 'Assigned'
+    // Reserve now, on the assumption of acceptance - not when they confirm.
+    appendToQueue(state, participant)
+
+    logAt(state, at, 'AssignmentCreated', `UP offered to ${participant.displayName}.`, {
+      visitId: visit.visitId,
+      participantId: participant.participantId,
+      assignmentId: assignment.assignmentId,
+    })
+    return true
   }
-  state.assignments.push(assignment)
-  participant.assignedTurns += 1
-  visit.status = 'Assigned'
-  // Reserve now, on the assumption of acceptance - not when they confirm.
-  appendToQueue(state, participant)
+  return false
+}
 
-  logAt(state, at, 'AssignmentCreated', `UP offered to ${participant.displayName}.`, {
-    visitId: visit.visitId,
-    participantId: participant.participantId,
-    assignmentId: assignment.assignmentId,
-  })
-  return true
+/** Exhausts every offer the current state makes possible, not just one. */
+function settleDispatch(state: MockState, at: string): void {
+  while (tryCreateOffer(state, at)) {
+    // keep going until nobody idle is eligible for any Waiting visit
+  }
 }
 
 /* -------------------------------------------------------------- commands */
@@ -357,7 +388,7 @@ export function registerVisitor(
 
   // Offers the oldest Waiting visit (which may not be this one, if an
   // earlier arrival is still waiting) - stays Waiting if no offer can be made.
-  tryCreateOffer(state, at)
+  settleDispatch(state, at)
   return { visitId: visit.visitId, duplicate: false, status: visit.status }
 }
 
@@ -416,7 +447,7 @@ export function acceptAssignment(
     assignmentId: assignment.assignmentId,
   })
 
-  tryCreateOffer(state, at)
+  settleDispatch(state, at)
 }
 
 /**
@@ -463,10 +494,11 @@ export function rejectAssignment(
     assignmentId: assignment.assignmentId,
   })
 
-  // Offers to a different eligible associate right away; never back to the
-  // one who just rejected. If nobody else is eligible, the visit stays
-  // Waiting - exactly as if it had just arrived while everyone was busy.
-  tryCreateOffer(state, at, participant.participantId)
+  // The visit's own history now excludes this participant for itself (see
+  // lastRejecterOf), so dispatch naturally offers it elsewhere if someone
+  // else is eligible, or leaves it Waiting - never back to the rejecter -
+  // without settleDispatch needing to know a reject just happened.
+  settleDispatch(state, at)
 }
 
 export function recordOutcome(
@@ -565,8 +597,8 @@ export function markDeparture(
   logAt(state, at, 'VisitorDeparted', 'Visitor exit recorded.', { visitId: visit.visitId })
 
   // Harmless no-op unless this departure cleared this participant's own
-  // pending offer: they're now eligible again, so try a new one for them.
-  if (!wasAlreadyComplete) tryCreateOffer(state, at)
+  // pending offer: they're now eligible again, so try new ones for them.
+  if (!wasAlreadyComplete) settleDispatch(state, at)
 }
 
 export function setAvailability(
@@ -612,7 +644,7 @@ export function setAvailability(
 
   // Returning Available attempts a dispatch; it is a no-op if a different
   // offer is already pending.
-  if (input.state === 'Available') tryCreateOffer(state, at)
+  if (input.state === 'Available') settleDispatch(state, at)
 }
 
 /* -------------------------------------------------------------- snapshot */
@@ -639,6 +671,27 @@ function waitingPositionOf(state: MockState, visit: MockVisit): number | null {
   return waitingOrder.findIndex((candidate) => candidate.visitId === visit.visitId) + 1
 }
 
+/**
+ * Server-computed, per visit (contract v5): why a Waiting visit has no
+ * assignment. Exactly one of three reasons, derived from the authoritative
+ * snapshot - never implied client-side, never "all associates busy".
+ */
+function waitingReasonOf(state: MockState, visit: MockVisit): WaitingReason | null {
+  if (visit.status !== 'Waiting' || visit.departedAt !== null) return null
+
+  const available = state.participants.filter((p) => p.state === 'Available')
+  if (available.length === 0) return 'NoAvailableAssociates'
+
+  const notBusy = available.filter((p) => pendingOfferOf(state, p.participantId) === undefined)
+  if (notBusy.length === 0) return 'AwaitingConfirmation'
+
+  const excluded = lastRejecterOf(state, visit.visitId)
+  const eligible = notBusy.filter((p) => p.participantId !== excluded)
+  // If `eligible` were non-empty here, dispatch would already have claimed
+  // this visit - `null` is the defensive fallback for that impossible case.
+  return eligible.length === 0 ? 'AwaitingOtherAssociate' : null
+}
+
 function toVisitView(state: MockState, visit: MockVisit): VisitView {
   // Waiting always means "no assignment currently connects to this visit" -
   // true by construction before Reject existed, but Reject introduces the
@@ -658,6 +711,7 @@ function toVisitView(state: MockState, visit: MockVisit): VisitView {
     outcome: visit.outcome,
     outcomeRecordedAt: visit.outcomeRecordedAt,
     waitingPosition: waitingPositionOf(state, visit),
+    waitingReason: waitingReasonOf(state, visit),
     assignmentId: assignment?.assignmentId ?? null,
   }
 }
