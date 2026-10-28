@@ -1,6 +1,14 @@
 /**
- * HttpBoardClient - the integration adapter. Same-origin `/api` paths, no
- * Supabase SDK, no SQL, no credentials in the bundle.
+ * HttpBoardClient - the integration adapter. No Supabase SDK, no SQL, no
+ * credentials in the bundle.
+ *
+ * Frontend and backend are two independent projects/deployments; this client
+ * never assumes same-origin hosting. Every request is built against a
+ * configurable `VITE_API_BASE_URL` (see `src/lib/env.ts`), and the backend is
+ * expected to answer with an environment-allowlisted CORS policy. An unset
+ * base URL falls back to relative `/api/...` paths, which only works when a
+ * dev proxy or reverse proxy happens to put both behind one origin - that is
+ * a local convenience, not the supported production shape.
  *
  * The operator token is held in memory for the tab's lifetime only; it is not
  * an account system and is never written to storage.
@@ -120,9 +128,11 @@ export class HttpBoardClient implements BoardService {
   }
 
   private async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    const base = import.meta.env.VITE_API_BASE_URL ?? ''
+    const url = `${base}${path}`
     let response: Response
     try {
-      response = await fetch(path, {
+      response = await fetch(url, {
         method,
         signal,
         headers: {

@@ -1,18 +1,12 @@
 /**
  * Deterministic review scenarios for MockBoardClient.
  *
- * Each one is built by replaying real engine transitions, so a seeded board is
- * always a state the backend could actually produce. `Reset Demo` is an action
- * available in every scenario rather than a scenario of its own.
+ * Each one is built by replaying real engine transitions, so a seeded board
+ * is always a state the backend could actually produce under the "advance
+ * on acceptance" rotation rule. `Reset Demo` is an action available in every
+ * scenario rather than a scenario of its own.
  */
-import {
-  acceptAssignment,
-  createSession,
-  markDeparture,
-  recordOutcome,
-  registerVisitor,
-  setAvailability,
-} from './mockEngine.ts'
+import { acceptAssignment, createSession, markDeparture, recordOutcome, registerVisitor } from './mockEngine.ts'
 import type { MockState } from './mockEngine.ts'
 import type { VisitorAttributes } from '../lib/types.ts'
 
@@ -21,7 +15,7 @@ export type ScenarioId =
   | 'pending'
   | 'accepted'
   | 'completed-inside'
-  | 'waiting-no-capacity'
+  | 'awaiting-confirmation'
   | 'departed-waiting'
   | 'departed-completed'
   | 'api-failure'
@@ -117,7 +111,7 @@ export const MOCK_SCENARIOS: MockScenario[] = [
   {
     id: 'pending',
     label: 'Pending turn',
-    description: 'One visitor Assigned; the reserved associate is Pending Acceptance. Accept UP is the next step.',
+    description: 'One visitor Assigned; the offer is Pending Acceptance. Accept UP is the next step.',
     build: (base) => {
       const state = freshSession(base)
       arrive(state, attributes.puffer, at(base, 4))
@@ -127,7 +121,8 @@ export const MOCK_SCENARIOS: MockScenario[] = [
   {
     id: 'accepted',
     label: 'Accepted turn',
-    description: 'Turn accepted, associate On UP, visitor Accepted and Inside. Sale / No-Sale is available.',
+    description:
+      'Turn accepted, visitor Accepted and Inside. The associate stays Available and keeps its new queue position - accepting a turn never makes them ineligible for a later offer.',
     build: (base) => {
       const state = freshSession(base)
       const visitId = arrive(state, attributes.puffer, at(base, 4))
@@ -138,8 +133,7 @@ export const MOCK_SCENARIOS: MockScenario[] = [
   {
     id: 'completed-inside',
     label: 'Completed but Inside',
-    description:
-      'Sale recorded, so the turn is Completed while presence is still Inside. The associate is back at the bottom of rotation.',
+    description: 'Sale recorded, so the turn is Completed while presence is still Inside. Rotation is unaffected.',
     build: (base) => {
       const state = freshSession(base)
       const visitId = arrive(state, attributes.trench, at(base, 3))
@@ -153,25 +147,15 @@ export const MOCK_SCENARIOS: MockScenario[] = [
     },
   },
   {
-    id: 'waiting-no-capacity',
-    label: 'Waiting, no capacity',
+    id: 'awaiting-confirmation',
+    label: 'Awaiting confirmation',
     description:
-      'One associate On UP, one Pending Acceptance, one Off Floor, so the newest visitor stays Waiting with no assignment.',
+      'Only one offer may be unresolved per session. The first visitor is offered; two more arrive and stay Waiting - even though every other associate is still Available - until that one offer is accepted.',
     build: (base) => {
       const state = freshSession(base)
-      const first = arrive(state, attributes.puffer, at(base, 2))
-      accept(state, first, at(base, 4))
-      arrive(state, attributes.trench, at(base, 7))
-      // The third associate is still idle at this point, so Off Floor is allowed.
-      const idle = state.participants.find((p) => p.state === 'Available')
-      if (idle !== undefined) {
-        setAvailability(
-          state,
-          { sessionId: state.sessionId, participantId: idle.participantId, commandId: 'seed_cmd_offfloor_1', state: 'OffFloor' },
-          at(base, 8),
-        )
-      }
-      arrive(state, attributes.unknown, at(base, 10))
+      arrive(state, attributes.puffer, at(base, 2))
+      arrive(state, attributes.trench, at(base, 5))
+      arrive(state, attributes.unknown, at(base, 7))
       return state
     },
   },
@@ -179,21 +163,11 @@ export const MOCK_SCENARIOS: MockScenario[] = [
     id: 'departed-waiting',
     label: 'Departed without assignment',
     description:
-      'A Waiting visitor left with No-Sale recorded and zero assignments - purchase result without an associate or turn.',
+      'A Waiting visitor (blocked behind the one pending offer) left with No-Sale recorded and zero assignments - purchase result without an associate or turn.',
     build: (base) => {
       const state = freshSession(base)
-      const first = arrive(state, attributes.puffer, at(base, 2))
-      accept(state, first, at(base, 4))
-      arrive(state, attributes.trench, at(base, 6))
-      const idle = state.participants.find((p) => p.state === 'Available')
-      if (idle !== undefined) {
-        setAvailability(
-          state,
-          { sessionId: state.sessionId, participantId: idle.participantId, commandId: 'seed_cmd_offfloor_1', state: 'OffFloor' },
-          at(base, 7),
-        )
-      }
-      const waiting = arrive(state, attributes.hoodie, at(base, 9))
+      arrive(state, attributes.puffer, at(base, 2)) // takes the one offer
+      const waiting = arrive(state, attributes.hoodie, at(base, 6)) // stays Waiting behind it
       markDeparture(state, { sessionId: state.sessionId, visitId: waiting, outcome: 'NoSale' }, at(base, 14))
       return state
     },
@@ -201,7 +175,7 @@ export const MOCK_SCENARIOS: MockScenario[] = [
   {
     id: 'departed-completed',
     label: 'Departed after completion',
-    description: 'Exit recorded after a Sale: the existing result is preserved read-only and the queue is untouched.',
+    description: 'Exit recorded after a Sale: the existing result is preserved read-only and rotation is untouched.',
     build: (base) => {
       const state = freshSession(base)
       const visitId = arrive(state, attributes.trench, at(base, 3))

@@ -1,14 +1,15 @@
 /**
  * Story-level checks on the mock engine. These verify the transitions the
- * stories describe, not component rendering: US-01 initial order, US-02
- * registration and idempotency, US-03 accept/outcome, US-04 departure,
- * US-05 availability and waiting fairness, US-06 reset and stale sessions.
+ * stories describe under "Assignment Rotation Revision - Advance on
+ * Acceptance": US-01 initial order, US-02 registration and idempotency,
+ * US-03 accept/outcome, US-04 departure, US-05 the single pending-offer
+ * gate and availability, US-06 reset and stale sessions.
  */
 import { describe, expect, it } from 'vitest'
 import { BoardError } from './boardService.ts'
 import * as engine from './mockEngine.ts'
 import type { MockState } from './mockEngine.ts'
-import { nextUpParticipantId } from '../lib/types.ts'
+import { hasPendingOffer, nextUpParticipantId } from '../lib/types.ts'
 import type { VisitorAttributes } from '../lib/types.ts'
 
 const BASE = new Date('2026-01-05T09:00:00.000Z')
@@ -40,6 +41,12 @@ function visitOf(state: MockState, visitId: string) {
   const visit = snap(state).visits.find((candidate) => candidate.visitId === visitId)
   if (visit === undefined) throw new Error('missing visit')
   return visit
+}
+
+function associateOf(state: MockState, participantId: string) {
+  const associate = snap(state).associates.find((candidate) => candidate.participantId === participantId)
+  if (associate === undefined) throw new Error('missing associate')
+  return associate
 }
 
 function assignmentIdOf(state: MockState, visitId: string): string {
@@ -77,17 +84,17 @@ describe('US-01 opening the board', () => {
 })
 
 describe('US-02 registering a visitor', () => {
-  it('reserves the first Available participant immediately', () => {
+  it('offers the first visitor to the front-of-queue associate, keeping their queue position', () => {
     const state = session()
     const visitId = arrive(state, 2)
     const board = snap(state)
 
     expect(visitOf(state, visitId).status).toBe('Assigned')
-    expect(board.associates[0].state).toBe('PendingAcceptance')
-    expect(board.associates[0].queuePosition).toBeNull()
+    // Offering never moves the participant or changes their availability.
+    expect(board.associates[0].state).toBe('Available')
+    expect(board.associates[0].queuePosition).toBe(1)
+    expect(board.associates[0].pendingAssignmentId).not.toBeNull()
     expect(board.associates[0].assignedTurns).toBe(1)
-    // Next UP moves on to the following eligible participant.
-    expect(nextUpParticipantId(board.associates)).toBe(board.associates[1].participantId)
   })
 
   it('writes Manual source, Manual attributes and NotRequested enrichment', () => {
@@ -138,23 +145,30 @@ describe('US-02 registering a visitor', () => {
 })
 
 describe('US-03 accepting and completing a turn', () => {
-  it('sets Accepted and On UP while keeping the participant ineligible', () => {
+  it('accepts, moves the participant to the queue bottom exactly once, and keeps them Available', () => {
     const state = session()
     const visitId = arrive(state, 2)
+    const first = snap(state).associates[0].participantId
     accept(state, visitId, 4)
     const board = snap(state)
 
     expect(visitOf(state, visitId).status).toBe('Accepted')
     expect(board.assignments[0].acceptedAt).toBe(at(4))
-    expect(board.associates[0].state).toBe('OnUP')
-    expect(board.associates[0].queuePosition).toBeNull()
-    expect(board.associates[0].acceptedTurns).toBe(1)
+    const accepted = associateOf(state, first)
+    expect(accepted.state).toBe('Available')
+    expect(accepted.pendingAssignmentId).toBeNull()
+    expect(accepted.activeTurns).toBe(1)
+    expect(accepted.acceptedTurns).toBe(1)
+    // Moved to the bottom, behind the two untouched participants.
+    expect(accepted.queuePosition).toBe(4)
   })
 
-  it('completes the turn, releases the participant to the bottom and leaves them Inside', () => {
+  it('completes the turn without touching rotation or availability; visitor stays Inside', () => {
     const state = session()
     const visitId = arrive(state, 2)
+    const participantId = snap(state).associates[0].participantId
     accept(state, visitId, 4)
+    const queueBefore = snap(state).associates.map((p) => p.queuePosition)
     const assignmentId = assignmentIdOf(state, visitId)
     engine.recordOutcome(state, { sessionId: state.sessionId, assignmentId, outcome: 'Sale' }, at(10))
 
@@ -166,23 +180,21 @@ describe('US-03 accepting and completing a turn', () => {
     expect(assignment?.completionReason).toBe('OutcomeRecorded')
     expect(assignment?.phase).toBe('Completed')
 
-    const released = snap(state).associates[0]
-    expect(released.state).toBe('Available')
-    // Bottom of rotation: behind the two untouched participants.
-    expect(released.queuePosition).toBe(4)
+    expect(snap(state).associates.map((p) => p.queuePosition)).toEqual(queueBefore)
+    expect(associateOf(state, participantId).activeTurns).toBe(0)
   })
 
   it('counts Sale visits only and uses every run visit as the denominator', () => {
     const state = session()
     const saleVisit = arrive(state, 1, 'evt_a')
-    const noSaleVisit = arrive(state, 2, 'evt_b')
-    accept(state, saleVisit, 3)
-    accept(state, noSaleVisit, 4)
+    accept(state, saleVisit, 2)
     engine.recordOutcome(
       state,
       { sessionId: state.sessionId, assignmentId: assignmentIdOf(state, saleVisit), outcome: 'Sale' },
-      at(5),
+      at(3),
     )
+    const noSaleVisit = arrive(state, 4, 'evt_b')
+    accept(state, noSaleVisit, 5)
     engine.recordOutcome(
       state,
       { sessionId: state.sessionId, assignmentId: assignmentIdOf(state, noSaleVisit), outcome: 'NoSale' },
@@ -205,7 +217,7 @@ describe('US-03 accepting and completing a turn', () => {
     accept(state, visitId, 4)
 
     engine.acceptAssignment(state, { sessionId: state.sessionId, assignmentId }, at(5))
-    expect(snap(state).associates[0].acceptedTurns).toBe(1)
+    expect(associateOf(state, snap(state).associates[0].participantId).acceptedTurns).toBe(1)
 
     engine.recordOutcome(state, { sessionId: state.sessionId, assignmentId, outcome: 'Sale' }, at(6))
     // Same outcome again is a no-op...
@@ -227,15 +239,78 @@ describe('US-03 accepting and completing a turn', () => {
   })
 })
 
-describe('US-04 registering a departure', () => {
-  it('lets a Waiting visitor leave with a result and zero assignments', () => {
+describe('US-05 rotation: at most one unresolved offer per session', () => {
+  it('offers A, B and C in turn as each accepts - the A -> B -> C -> A regression', () => {
     const state = session()
-    // Fill every participant so the fourth arrival has no capacity.
-    const a = arrive(state, 1, 'evt_1')
-    const b = arrive(state, 2, 'evt_2')
-    const c = arrive(state, 3, 'evt_3')
-    const waiting = arrive(state, 4, 'evt_4')
-    expect([a, b, c].every((id) => visitOf(state, id).status === 'Assigned')).toBe(true)
+    const [a, b, c] = snap(state).associates.map((p) => p.participantId)
+
+    const v1 = arrive(state, 1, 'evt_1')
+    expect(visitOf(state, v1).status).toBe('Assigned')
+    expect(associateOf(state, a).pendingAssignmentId).not.toBeNull()
+
+    const v2 = arrive(state, 2, 'evt_2')
+    const v3 = arrive(state, 3, 'evt_3')
+    const v4 = arrive(state, 4, 'evt_4')
+    // All three remain Available; none is "busy" - only the gate blocks offers.
+    expect(snap(state).associates.every((p) => p.state === 'Available')).toBe(true)
+    expect(visitOf(state, v2).status).toBe('Waiting')
+    expect(visitOf(state, v3).status).toBe('Waiting')
+    expect(visitOf(state, v4).status).toBe('Waiting')
+
+    accept(state, v1, 5) // A accepts -> offer V2 to B
+    expect(associateOf(state, a).queuePosition).toBe(4)
+    expect(visitOf(state, v2).status).toBe('Assigned')
+    expect(associateOf(state, b).pendingAssignmentId).not.toBeNull()
+
+    accept(state, v2, 6) // B accepts -> offer V3 to C
+    expect(associateOf(state, b).queuePosition).toBe(5)
+    expect(visitOf(state, v3).status).toBe('Assigned')
+    expect(associateOf(state, c).pendingAssignmentId).not.toBeNull()
+
+    accept(state, v3, 7) // C accepts -> offer V4 to A, even though A's V1 is still unfinished
+    expect(associateOf(state, c).queuePosition).toBe(6)
+    expect(visitOf(state, v4).status).toBe('Assigned')
+    const offerForV4 = snap(state).assignments.find((asg) => asg.visitId === v4)
+    expect(offerForV4?.participantId).toBe(a)
+    expect(associateOf(state, a).activeTurns).toBe(1) // V1 still accepted, unfinished
+    expect(associateOf(state, a).pendingAssignmentId).toBe(offerForV4?.assignmentId)
+
+    // No sale was ever completed in this whole sequence.
+    expect(snap(state).metrics.closedSales).toBe(0)
+  })
+
+  it('never offers a second visit while one offer is unresolved, even with other Available associates', () => {
+    const state = session()
+    arrive(state, 1, 'evt_1')
+    arrive(state, 2, 'evt_2')
+    arrive(state, 3, 'evt_3')
+
+    const board = snap(state)
+    expect(board.assignments).toHaveLength(1)
+    expect(board.visits.filter((v) => v.status === 'Waiting')).toHaveLength(2)
+    expect(hasPendingOffer(board)).toBe(true)
+  })
+
+  it('lets accepted, unfinished work coexist with a brand new offer to the same associate', () => {
+    const state = session()
+    const v1 = arrive(state, 1, 'evt_1')
+    accept(state, v1, 2) // front-of-queue associate now has one accepted-unfinished turn
+    const sameAssociate = snap(state).assignments[0].participantId
+
+    // Two more arrive; the second one loops back to the same associate once
+    // the first is accepted, per the A -> B -> C -> A cycle on a 1-roster slice.
+    const v2 = arrive(state, 3, 'evt_2')
+    expect(associateOf(state, sameAssociate).activeTurns).toBe(1)
+    expect(visitOf(state, v2).status).toBe('Assigned')
+  })
+})
+
+describe('US-04 registering a departure', () => {
+  it('lets a Waiting visitor (blocked behind the gate) leave with a result and zero assignments', () => {
+    const state = session()
+    arrive(state, 1, 'evt_1') // takes the one offer
+    const waiting = arrive(state, 2, 'evt_2') // stays Waiting behind it
+
     expect(visitOf(state, waiting).status).toBe('Waiting')
     expect(visitOf(state, waiting).assignmentId).toBeNull()
     expect(visitOf(state, waiting).waitingPosition).toBe(1)
@@ -247,8 +322,7 @@ describe('US-04 registering a departure', () => {
     expect(visit.status).toBe('Completed')
     expect(visit.outcome).toBe('NoSale')
     expect(visit.assignmentId).toBeNull()
-    expect(visit.waitingPosition).toBeNull()
-    expect(snap(state).metrics.assignedTurns).toBe(3)
+    expect(snap(state).metrics.assignedTurns).toBe(1)
   })
 
   it('requires an explicit result when none is recorded yet', () => {
@@ -259,50 +333,64 @@ describe('US-04 registering a departure', () => {
     ).toThrow(BoardError)
   })
 
-  it('closes a pending assignment with reason Departure and no acceptedAt', () => {
+  it('closes a pending offer with reason Departure, clears the gate, and never consumes the turn or moves the queue', () => {
     const state = session()
     const visitId = arrive(state, 2)
+    const participantId = snap(state).associates[0].participantId
     const assignmentId = assignmentIdOf(state, visitId)
+    const next = arrive(state, 3, 'evt_next') // stays Waiting behind the pending offer
+
     engine.markDeparture(state, { sessionId: state.sessionId, visitId, outcome: 'NoSale' }, at(5))
 
     const assignment = snap(state).assignments.find((a) => a.assignmentId === assignmentId)
     expect(assignment?.completionReason).toBe('Departure')
     expect(assignment?.acceptedAt).toBeNull()
-    // The reserved participant is released exactly once, to the bottom.
-    const associates = snap(state).associates
-    expect(associates[0].state).toBe('Available')
-    expect(associates[0].queuePosition).toBe(4)
+    // The turn is not consumed and the queue is not moved by this departure:
+    // the same associate is still front-of-queue, so the freshly cleared
+    // gate immediately offers them the next oldest Waiting visit.
+    const associate = associateOf(state, participantId)
+    expect(associate.state).toBe('Available')
+    expect(associate.queuePosition).toBe(1)
+    expect(associate.pendingAssignmentId).not.toBe(assignmentId)
+    expect(associate.pendingAssignmentId).not.toBeNull()
+    expect(visitOf(state, next).status).toBe('Assigned')
+    expect(visitOf(state, next).assignmentId).toBe(associate.pendingAssignmentId)
   })
 
-  it('closes an accepted assignment with reason Departure while keeping acceptedAt', () => {
+  it('closes an accepted assignment with reason Departure while keeping acceptedAt and rotation unchanged', () => {
     const state = session()
     const visitId = arrive(state, 2)
+    const participantId = snap(state).associates[0].participantId
     const assignmentId = assignmentIdOf(state, visitId)
     accept(state, visitId, 4)
+    const queueBefore = snap(state).associates.map((p) => p.queuePosition)
+
     engine.markDeparture(state, { sessionId: state.sessionId, visitId, outcome: 'Sale' }, at(9))
 
     const assignment = snap(state).assignments.find((a) => a.assignmentId === assignmentId)
     expect(assignment?.acceptedAt).toBe(at(4))
     expect(assignment?.completionReason).toBe('Departure')
     expect(visitOf(state, visitId).outcome).toBe('Sale')
+    expect(snap(state).associates.map((p) => p.queuePosition)).toEqual(queueBefore)
+    expect(associateOf(state, participantId).activeTurns).toBe(0)
   })
 
-  it('does not touch the queue when the turn was already completed', () => {
+  it('does not touch rotation when the turn was already completed', () => {
     const state = session()
-    const first = arrive(state, 1, 'evt_1')
-    accept(state, first, 2)
+    const visitId = arrive(state, 1, 'evt_1')
+    accept(state, visitId, 2)
     engine.recordOutcome(
       state,
-      { sessionId: state.sessionId, assignmentId: assignmentIdOf(state, first), outcome: 'Sale' },
+      { sessionId: state.sessionId, assignmentId: assignmentIdOf(state, visitId), outcome: 'Sale' },
       at(5),
     )
     const queueAfterOutcome = snap(state).associates.map((p) => p.queuePosition)
 
-    engine.markDeparture(state, { sessionId: state.sessionId, visitId: first, outcome: null }, at(8))
+    engine.markDeparture(state, { sessionId: state.sessionId, visitId, outcome: null }, at(8))
 
     expect(snap(state).associates.map((p) => p.queuePosition)).toEqual(queueAfterOutcome)
-    expect(visitOf(state, first).outcome).toBe('Sale')
-    expect(visitOf(state, first).departedAt).toBe(at(8))
+    expect(visitOf(state, visitId).outcome).toBe('Sale')
+    expect(visitOf(state, visitId).departedAt).toBe(at(8))
   })
 
   it('preserves the original exit on a duplicate and rejects a conflicting result', () => {
@@ -328,30 +416,32 @@ describe('US-04 registering a departure', () => {
   })
 })
 
-describe('US-05 availability and waiting visitors', () => {
-  it('refuses availability changes for a busy participant', () => {
+describe('US-05 availability', () => {
+  it('rejects Off Floor only while the associate owns the pending offer; accepted work never blocks it', () => {
     const state = session()
     const visitId = arrive(state, 2)
-    const reserved = snap(state).associates[0]
+    const owner = snap(state).associates[0].participantId
+
     expect(() =>
       engine.setAvailability(
         state,
-        { sessionId: state.sessionId, participantId: reserved.participantId, commandId: 'cmd_a', state: 'OffFloor' },
+        { sessionId: state.sessionId, participantId: owner, commandId: 'cmd_a', state: 'OffFloor' },
         at(3),
       ),
     ).toThrow(BoardError)
 
     accept(state, visitId, 4)
-    expect(() =>
-      engine.setAvailability(
-        state,
-        { sessionId: state.sessionId, participantId: reserved.participantId, commandId: 'cmd_b', state: 'OffFloor' },
-        at(5),
-      ),
-    ).toThrow(BoardError)
+    // Now only accepted, unfinished work remains - Off Floor is allowed.
+    engine.setAvailability(
+      state,
+      { sessionId: state.sessionId, participantId: owner, commandId: 'cmd_b', state: 'OffFloor' },
+      at(5),
+    )
+    expect(associateOf(state, owner).state).toBe('OffFloor')
+    expect(associateOf(state, owner).activeTurns).toBe(1)
   })
 
-  it('keeps a visit Waiting while everyone is Off Floor, then assigns on return', () => {
+  it('keeps a visit Waiting while everyone is Off Floor ("No available associates"), then offers on return', () => {
     const state = session()
     for (const participant of snap(state).associates) {
       engine.setAvailability(
@@ -369,6 +459,7 @@ describe('US-05 availability and waiting visitors', () => {
     const visitId = arrive(state, 2)
     expect(visitOf(state, visitId).status).toBe('Waiting')
     expect(snap(state).metrics.assignedTurns).toBe(0)
+    expect(hasPendingOffer(snap(state))).toBe(false)
 
     const returning = snap(state).associates[1]
     engine.setAvailability(
@@ -382,25 +473,23 @@ describe('US-05 availability and waiting visitors', () => {
     expect(assignment?.participantId).toBe(returning.participantId)
   })
 
-  it('assigns waiting visits in registration order when capacity returns', () => {
+  it('assigns waiting visits in registration order as the gate clears', () => {
     const state = session()
     const ids = [1, 2, 3, 4, 5].map((minute) => arrive(state, minute, `evt_${minute}`))
-    const [first, , , fourth, fifth] = ids
+    const [first, second, third, fourth, fifth] = ids
+    expect(visitOf(state, second).status).toBe('Waiting')
     expect(visitOf(state, fourth).status).toBe('Waiting')
     expect(visitOf(state, fifth).status).toBe('Waiting')
 
-    const firstAssignmentId = assignmentIdOf(state, first)
-    accept(state, first, 6)
-    engine.recordOutcome(state, { sessionId: state.sessionId, assignmentId: firstAssignmentId, outcome: 'Sale' }, at(7))
+    accept(state, first, 6) // offers V2
+    accept(state, second, 7) // offers V3
+    accept(state, third, 8) // offers V4, oldest remaining - not V5
 
-    // The released participant takes the oldest waiting visit, not the newest.
     expect(visitOf(state, fourth).status).toBe('Assigned')
     expect(visitOf(state, fifth).status).toBe('Waiting')
-    expect(visitOf(state, ids[1]).status).toBe('Assigned')
-    expect(visitOf(state, ids[2]).status).toBe('Assigned')
   })
 
-  it('appends a returning participant to the bottom of the rotation', () => {
+  it('appends a returning participant to the bottom and only dispatches when no offer is pending', () => {
     const state = session()
     const target = snap(state).associates[0]
     engine.setAvailability(
@@ -408,15 +497,21 @@ describe('US-05 availability and waiting visitors', () => {
       { sessionId: state.sessionId, participantId: target.participantId, commandId: 'cmd_off', state: 'OffFloor' },
       at(1),
     )
-    expect(snap(state).associates[0].queuePosition).toBeNull()
+    expect(associateOf(state, target.participantId).queuePosition).toBeNull()
 
+    // A different pending offer exists; returning Available must not create a second one.
+    const visitId = arrive(state, 2, 'evt_pending')
     engine.setAvailability(
       state,
       { sessionId: state.sessionId, participantId: target.participantId, commandId: 'cmd_on', state: 'Available' },
-      at(2),
+      at(3),
     )
-    expect(snap(state).associates[0].queuePosition).toBe(4)
-    expect(nextUpParticipantId(snap(state).associates)).toBe(snap(state).associates[1].participantId)
+    // Queue tokens only increase - position 3 is still held by the
+    // associate who never left, so the returning one joins at 4.
+    expect(associateOf(state, target.participantId).queuePosition).toBe(4)
+    expect(associateOf(state, target.participantId).pendingAssignmentId).toBeNull()
+    expect(snap(state).assignments).toHaveLength(1)
+    expect(visitOf(state, visitId).status).toBe('Assigned')
   })
 
   it('treats a delayed replay of the original commandId as a no-op', () => {
@@ -441,21 +536,18 @@ describe('US-05 availability and waiting visitors', () => {
       at(3),
     )
     expect(snap(state).associates.map((p) => p.queuePosition)).toEqual(positions)
-    expect(snap(state).associates[0].state).toBe('Available')
+    expect(associateOf(state, target.participantId).state).toBe('Available')
   })
 
-  it('never reserves one participant twice under rapid arrivals', () => {
+  it('setting the same state again is a no-op that keeps the queue position', () => {
     const state = session()
-    const ids = [1, 2, 3, 4].map((minute) => arrive(state, minute, `evt_${minute}`))
-    const assigned = ids
-      .map((id) => visitOf(state, id).assignmentId)
-      .filter((value): value is string => value !== null)
-    const participantIds = assigned.map(
-      (assignmentId) => snap(state).assignments.find((a) => a.assignmentId === assignmentId)?.participantId,
+    const target = snap(state).associates[0]
+    engine.setAvailability(
+      state,
+      { sessionId: state.sessionId, participantId: target.participantId, commandId: 'cmd_noop', state: 'Available' },
+      at(1),
     )
-
-    expect(assigned).toHaveLength(3)
-    expect(new Set(participantIds).size).toBe(3)
+    expect(associateOf(state, target.participantId).queuePosition).toBe(1)
   })
 })
 

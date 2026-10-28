@@ -32,7 +32,8 @@ Copy `.env.example` to `.env.local`. Nothing secret belongs in it.
 | Variable | Values | Effect |
 |---|---|---|
 | `VITE_BOARD_CLIENT` | `mock` \| `http` | Which adapter starts. Unset = `mock` in dev, `http` in a build. |
-| `VITE_API_PROXY_TARGET` | URL | Dev-only: where the Vite dev server forwards `/api`. Deployments use same-origin `/api`. |
+| `VITE_API_BASE_URL` | absolute origin, e.g. `http://localhost:3000` | Where `HttpBoardClient` sends requests. Frontend and backend are two independent deployments; this is the supported way to point at the backend - not a same-origin assumption. |
+| `VITE_API_PROXY_TARGET` | URL | Dev-only convenience: where the Vite dev server forwards relative `/api/...` paths if `VITE_API_BASE_URL` is left unset. Not used in a production build. |
 
 There is no Supabase URL, anon key or service role key in this project, and no
 database access from the browser. In `http` mode a small connect prompt asks
@@ -101,6 +102,45 @@ backend's own current-state check makes a blind retry of those safe and
 reports it back as `replayed`/`duplicate`, so a retry just resends the same
 body.
 
+### Rotation model: advance on acceptance
+
+Per [Assignment Rotation Revision](../Assignment%20Rotation%20Revision.md)
+(a breaking change over the original "exclusive until outcome" model):
+
+* An associate's own availability is only `Available`/`OffFloor`
+  (`AssociateView.state`). Accepted, unfinished work never makes an
+  associate ineligible — `activeTurns`/`activeAssignmentIds` track that
+  separately, and any number of accepted-unfinished turns per associate is
+  valid.
+* At most **one** unresolved offer (`PendingAcceptance`) exists across the
+  whole session at a time — not one per associate. A later Waiting visitor
+  waits for *that* offer regardless of how many other associates are
+  Available; `AssociateView.pendingAssignmentId` names its owner.
+* Offering a visit never moves the offered associate's queue position or
+  availability. Only **accepting** does that — exactly once, immediately
+  followed by an attempt to offer the next oldest Waiting visit. A normal
+  outcome (Sale/No-Sale) never touches rotation or availability.
+* Departure of a still-pending offer closes it (`completionReason:
+  "Departure"`) and clears the gate without consuming the associate's turn
+  or moving the queue. Departure of an accepted or completed turn doesn't
+  touch rotation either.
+* Off Floor is rejected only while that associate owns the session's one
+  pending offer (`canMarkOffFloor` in `src/lib/types.ts`) — never because of
+  accepted-unfinished work.
+* A Waiting visit's "no assignment" reason is exactly one of two things,
+  computed in `DashboardPage.explainWaiting`: *Awaiting confirmation* (the
+  one pending offer is unresolved) or *No available associates* (nobody is
+  Available). "All associates busy" is never shown — accepted-unfinished
+  work is not a reason.
+* The one pending offer, if any, is also highlighted above the Visitors
+  table with its own Accept UP button (`findPendingOffer` in
+  `src/lib/selectors.ts`), not just inside its table row.
+
+`mockEngine.test.ts` includes the backlog's required A → B → C → A
+regression: four sequential arrivals and acceptances cycle through every
+associate without ever completing a sale, proving the gate — not individual
+associate exclusivity — is what serializes offers.
+
 ### Separate state, never inferred
 
 Visit status, physical presence and purchase outcome are three independent
@@ -128,11 +168,11 @@ until the new board has loaded.
 
 ## Mock scenarios
 
-`MockBoardClient` wraps `mockEngine.ts`, which implements the same transitions
-the backend owns — FIFO registration, one unfinished assignment per
-participant, release to the bottom of rotation, waiting dispatch when capacity
-returns, idempotent commands, rejected conflicts. Mock behaviour exists only
-there, not spread through components.
+`MockBoardClient` wraps `mockEngine.ts`, which implements the same
+advance-on-acceptance transitions the backend owns — FIFO registration, the
+one-pending-offer-per-session gate, release to the bottom of rotation only on
+acceptance, idempotent commands, rejected conflicts. Mock behaviour exists
+only there, not spread through components.
 
 Roster: Avery Collins, Jordan Reyes, Morgan Patel — Available in that order.
 
@@ -141,12 +181,12 @@ Switch scenarios from the mock-mode panel at the top of the dashboard:
 | Scenario | What it shows |
 |---|---|
 | Empty run | Seeded session, no visits, zero counts and 0% conversion |
-| Pending turn | Visit Assigned, associate Pending Acceptance, Accept UP offered |
-| Accepted turn | Visit Accepted, associate On UP, Sale / No-Sale offered |
-| Completed but Inside | Sale recorded, service Completed, presence still Inside |
-| Waiting, no capacity | One On UP, one Pending Acceptance, one Off Floor, newest visit Waiting with a stated reason |
-| Departed without assignment | Waiting visitor left with No-Sale and zero assignments |
-| Departed after completion | Exit after a Sale: result preserved read-only, queue untouched |
+| Pending turn | Visit Assigned, the one offer is Pending Acceptance, Accept UP offered |
+| Accepted turn | Visit Accepted; the associate stays Available and keeps its new queue position - accepting never makes it ineligible |
+| Completed but Inside | Sale recorded, turn Completed, presence still Inside, rotation unaffected |
+| Awaiting confirmation | Three visitors arrive; only the first is offered - the other two stay Waiting *even though every other associate is Available*, purely because of the single-offer gate |
+| Departed without assignment | A Waiting visitor (blocked behind the gate) left with No-Sale and zero assignments |
+| Departed after completion | Exit after a Sale: result preserved read-only, rotation untouched |
 | Temporary API failure | First two reads fail, then the board recovers |
 
 **Fail the next read** forces a single read failure at any time, to see the
@@ -160,7 +200,7 @@ offline state and recovery. **Reset Demo** works in every scenario.
 | US-02 Register manually | `VisitorForm` create mode, `eventId` idempotency, server-set `arrivedAt`/order, Manual + NotRequested, profile-only correction via edit mode |
 | US-03 Accept and complete | `Accept UP` for a pending assignment only; `Sale` / `No-Sale` for an accepted unfinished turn; release to rotation bottom; Completed stays Inside |
 | US-04 Register departure | `ExitDialog`: requires a missing result, preserves an existing one read-only; Waiting visitors can leave unassigned |
-| US-05 Availability and waiting | `AssociatesTable` idle-only availability, bottom-of-queue return, stated reason when nothing can be assigned |
+| US-05 Availability and waiting | `AssociatesTable` Off Floor blocked only for the pending-offer owner, bottom-of-queue return, the two-reason Waiting explanation, the one-offer gate itself |
 | US-06 Reset | `ResetDialog` destructive confirmation, mutations blocked, old snapshots discarded, new board loads at zero |
 
 `npm test` covers these transitions directly against the mock engine
@@ -168,24 +208,42 @@ plus a render smoke check of the app tree.
 
 ## Remaining API integration work
 
-The contract below is confirmed against the backend's own canonical,
-dependency-free source — `retail-intelligence-backend/src/contracts/dto.ts`
-and `errors.ts` — not guessed. `src/lib/types.ts`, `httpBoardClient.ts` and
-`boardService.ts` already match it. What is **not yet verified** is running
-the HTTP adapter against a live server:
+**Current status: the backend had not yet applied [Assignment Rotation
+Revision](../Assignment%20Rotation%20Revision.md) as of this frontend change**
+(confirmed by reading its `src/contracts/dto.ts`, which still has
+`PendingAcceptance`/`OnUP` as associate states and a singular
+`currentAssignmentId`). This frontend has moved to the *new* contract
+(`AvailabilityState`-only associate state, `pendingAssignmentId` /
+`activeAssignmentIds` / `activeTurns`, the one-pending-offer-per-session
+rule). **`VITE_BOARD_CLIENT` is pinned to `mock` in `.env.local` until the
+backend migrates** — do not flip it to `http` before that, or the UI will
+read the old shape as if it were the new one. An earlier pass of this file
+did verify all 8 endpoints end-to-end against a live (pre-revision) backend;
+that verification is now stale and must be redone once the migration lands.
 
-1. **Local dev server.** The backend's local dev server (port 3000, matching
-   `VITE_API_PROXY_TARGET`'s default and the Vite proxy in `vite.config.ts`)
-   was still pending as of this check. Once it exists, set
-   `VITE_BOARD_CLIENT=http` and run both `npm run dev` processes side by side.
-2. **Re-run the story checks against the real path** — normal flow,
+1. **Wait for the backend's rotation migration**, then re-point
+   `VITE_BOARD_CLIENT=http` and `VITE_API_BASE_URL` (or
+   `VITE_API_PROXY_TARGET` for the dev proxy) at it.
+2. **Re-verify all 8 endpoints end-to-end**, same as before, plus
+   specifically: the A → B → C → A acceptance cycle, a second arrival
+   staying Waiting while every other associate is Available, Off Floor
+   succeeding with accepted-unfinished work but failing for the pending-offer
+   owner, and a pending-offer departure clearing the gate without moving the
+   queue.
+3. **Re-run the story checks against the real path** — normal flow,
    Waiting/Off Floor, retries and concurrency, all departure states, a sale
    without an assignment, and reset with stale writes — the same scenarios
    `npm test` already covers against the mock engine.
-3. **Watch for contract drift.** If the backend's contract changes, update
-   `src/lib/types.ts`, `src/lib/labels.ts`, `src/lib/selectors.ts`,
-   `mockEngine.ts` and `httpBoardClient.ts` together; they currently agree
-   field-for-field, including:
+4. **Confirm CORS and hosting.** Frontend and backend are independent
+   deployments now (`API_BASE_URL`, not same-origin `/api`); confirm the
+   backend's CORS allowlist actually includes this frontend's origin and
+   handles `OPTIONS` for `GET/POST/PATCH` with `Authorization`/
+   `Content-Type`.
+5. **Watch for further contract drift.** If the backend's contract changes
+   again, update `src/lib/types.ts`, `src/lib/labels.ts`,
+   `src/lib/selectors.ts`, `mockEngine.ts` and `httpBoardClient.ts` together;
+   they currently agree field-for-field with the *post-revision* contract,
+   including:
    * routes — `POST /api/arrivals`, `PATCH /api/visits/{id}/attributes`,
      `POST /api/assignments/{id}/accept`, `POST /api/assignments/{id}/outcome`
      (keyed by **assignment**, not visit), `POST /api/visits/{id}/departure`,
@@ -201,9 +259,12 @@ the HTTP adapter against a live server:
      is the array position, there is no `registrationOrder` field
    * `metrics.conversionRate` is already a percentage (0..100), not a 0..1
      fraction
+   * `AssociateView.state` is `Available | OffFloor` only; `pendingAssignmentId`
+     (nullable), `activeAssignmentIds` (array) and `activeTurns` replace the
+     old singular `currentAssignmentId`
    * error bodies are `{code, message}`; `BoardError.fromApi` maps every code
      in `Backend Requirements.md` §6
-4. **Confirm auth.** The operator token is sent as
+6. **Confirm auth.** The operator token is sent as
    `Authorization: Bearer <token>`; confirm the real header name and whether
    a token is required at all in the deployed environment.
 

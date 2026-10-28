@@ -9,14 +9,18 @@
  * The two repos are separate deployments, so the shapes are copied rather
  * than imported; if the backend contract changes, update this file to match
  * and do not drift the public shape unilaterally from the frontend side.
+ *
+ * Reflects "Assignment Rotation Revision - Advance on Acceptance": an
+ * associate's own availability is only Available/OffFloor - accepted,
+ * unfinished work no longer makes them ineligible, and at most one
+ * unresolved pending offer exists across the whole session (not one
+ * unfinished assignment per participant). The backend had not yet applied
+ * this migration as of this change; see README for the coordination note.
  */
 
 /* ------------------------------------------------------------ enum values */
 
-export const ParticipantStates = ['Available', 'OffFloor', 'PendingAcceptance', 'OnUP'] as const
-export type ParticipantState = (typeof ParticipantStates)[number]
-
-/** States an operator may request for an idle participant. */
+/** An associate's own availability. Accepted/pending work is tracked on the assignment, not here. */
 export const AvailabilityStates = ['Available', 'OffFloor'] as const
 export type AvailabilityState = (typeof AvailabilityStates)[number]
 
@@ -76,11 +80,15 @@ export interface AssociateView {
   /** Stable roster identity, kept across demo resets. */
   associateId: string
   displayName: string
-  state: ParticipantState
+  state: AvailabilityState
   /** 1-based rank among Available participants; null unless Available. */
   queuePosition: number | null
-  /** Unfinished assignment of this participant; null when idle. */
-  currentAssignmentId: string | null
+  /** The session's single unresolved offer, if this associate holds it. */
+  pendingAssignmentId: string | null
+  /** Accepted, unfinished assignments - any number of these is valid. */
+  activeAssignmentIds: string[]
+  activeTurns: number
+  /** Created offers, including ones later closed by early departure. */
   assignedTurns: number
   acceptedTurns: number
 }
@@ -190,7 +198,16 @@ export function canMarkExit(visit: VisitView): boolean {
   return visit.departedAt === null
 }
 
-/** Availability can only be changed for an idle participant. */
-export function isIdle(associate: AssociateView): boolean {
-  return associate.state === 'Available' || associate.state === 'OffFloor'
+/**
+ * Off Floor is rejected only while the associate owns the session's one
+ * unresolved pending offer - accepted, unfinished work never blocks it.
+ * Available -> Available is always allowed (there is nothing to resolve).
+ */
+export function canMarkOffFloor(associate: AssociateView): boolean {
+  return associate.pendingAssignmentId === null
+}
+
+/** True while any assignment in the session is offered but not yet accepted. */
+export function hasPendingOffer(snapshot: BoardSnapshot): boolean {
+  return snapshot.assignments.some((assignment) => assignment.phase === 'PendingAcceptance')
 }

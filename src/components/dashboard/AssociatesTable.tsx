@@ -3,8 +3,8 @@ import { Button } from '../ui/Button.tsx'
 import { DataTable } from '../ui/DataTable.tsx'
 import type { Column, TableState } from '../ui/DataTable.tsx'
 import { StatusBadge } from '../ui/StatusBadge.tsx'
-import { participantStateLabels, participantStateTones } from '../../lib/labels.ts'
-import { isIdle, nextUpParticipantId } from '../../lib/types.ts'
+import { assignmentPhaseLabels, availabilityLabels, availabilityTones } from '../../lib/labels.ts'
+import { canMarkOffFloor, nextUpParticipantId } from '../../lib/types.ts'
 import type { AssociateView, AvailabilityState } from '../../lib/types.ts'
 import { actionKeys } from '../../hooks/useBoard.ts'
 
@@ -18,8 +18,10 @@ interface AssociatesTableProps {
 }
 
 /**
- * Secondary table. Queue order comes from the server: there is no local
- * sorting control, and returning Available always joins the bottom.
+ * Secondary table. Availability (Available/OffFloor) and assignment work are
+ * shown as two independent facts: accepted, unfinished turns never make an
+ * associate ineligible, and a pending offer blocks a new one only through the
+ * session-wide gate, not through this associate's own state.
  */
 export function AssociatesTable({
   associates,
@@ -40,14 +42,33 @@ export function AssociatesTable({
         cell: (associate) => <span className="font-medium text-ink">{associate.displayName}</span>,
       },
       {
-        key: 'state',
-        header: 'State',
-        width: 'w-44',
+        key: 'availability',
+        header: 'Availability',
+        width: 'w-32',
         cell: (associate) => (
-          <StatusBadge tone={participantStateTones[associate.state]}>
-            {participantStateLabels[associate.state]}
-          </StatusBadge>
+          <StatusBadge tone={availabilityTones[associate.state]}>{availabilityLabels[associate.state]}</StatusBadge>
         ),
+      },
+      {
+        key: 'assignment',
+        header: 'Assignment',
+        width: 'w-40',
+        cell: (associate) => {
+          // Shown separately from availability: accepted unfinished work is
+          // never evidence of ineligibility, and at most one associate at a
+          // time can hold the session's pending offer.
+          if (associate.pendingAssignmentId !== null) {
+            return <StatusBadge tone="warning">{assignmentPhaseLabels.PendingAcceptance}</StatusBadge>
+          }
+          if (associate.activeTurns > 0) {
+            return (
+              <span className="text-ink">
+                {associate.activeTurns} active {associate.activeTurns === 1 ? 'turn' : 'turns'}
+              </span>
+            )
+          }
+          return <span className="text-muted">None</span>
+        },
       },
       {
         key: 'queue',
@@ -82,24 +103,40 @@ export function AssociatesTable({
         key: 'actions',
         header: 'Availability actions',
         headerHidden: true,
-        width: 'w-56',
+        width: 'w-64',
         cell: (associate) => {
-          // Pending Acceptance and On UP are not idle, so availability is
-          // locked rather than hidden - the reason stays visible.
-          if (!isIdle(associate)) {
-            return <span className="text-label text-muted">Busy — availability locked</span>
+          if (associate.state === 'OffFloor') {
+            return (
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={mutationsBlocked}
+                pending={isPending(actionKeys.availability(associate.participantId))}
+                onClick={() => onSetAvailability(associate, 'Available')}
+              >
+                Mark Available
+              </Button>
+            )
           }
-          const next: AvailabilityState = associate.state === 'Available' ? 'OffFloor' : 'Available'
+
+          // Off Floor is rejected only while this associate owns the
+          // session's one pending offer; accepted work never blocks it.
+          const blocked = !canMarkOffFloor(associate)
           return (
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={mutationsBlocked}
-              pending={isPending(actionKeys.availability(associate.participantId))}
-              onClick={() => onSetAvailability(associate, next)}
-            >
-              {next === 'OffFloor' ? 'Mark Off Floor' : 'Mark Available'}
-            </Button>
+            <div className="flex flex-col gap-1">
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={mutationsBlocked || blocked}
+                pending={isPending(actionKeys.availability(associate.participantId))}
+                onClick={() => onSetAvailability(associate, 'OffFloor')}
+              >
+                Mark Off Floor
+              </Button>
+              {blocked ? (
+                <span className="text-label text-muted">Owns the pending offer — resolve it first.</span>
+              ) : null}
+            </div>
           )
         },
       },
@@ -114,7 +151,8 @@ export function AssociatesTable({
           Associates
         </h2>
         <p className="text-label text-muted">
-          Rotation order is server-authoritative. Availability can only change for an idle associate.
+          Rotation order is server-authoritative. Accepted, unfinished work never blocks a new offer; only the owner
+          of the session's one pending offer cannot go Off Floor.
         </p>
       </div>
       <DataTable

@@ -29,3 +29,25 @@ export function buildVisitRows(snapshot: BoardSnapshot): VisitRow[] {
 export function findAssociate(snapshot: BoardSnapshot, participantId: string): AssociateView | undefined {
   return snapshot.associates.find((candidate) => candidate.participantId === participantId)
 }
+
+export interface PendingOffer {
+  visit: VisitView
+  assignment: AssignmentView
+  associateName: string
+}
+
+/**
+ * The session's one unresolved offer, if any. At most one can exist at a
+ * time under the "advance on acceptance" rotation rule, and later arrivals
+ * wait on it regardless of how many other associates are Available.
+ */
+export function findPendingOffer(snapshot: BoardSnapshot): PendingOffer | null {
+  const assignment = snapshot.assignments.find((candidate) => candidate.phase === 'PendingAcceptance')
+  if (assignment === undefined) return null
+
+  const visit = snapshot.visits.find((candidate) => candidate.visitId === assignment.visitId)
+  const associate = snapshot.associates.find((candidate) => candidate.participantId === assignment.participantId)
+  if (visit === undefined || associate === undefined) return null
+
+  return { visit, assignment, associateName: associate.displayName }
+}

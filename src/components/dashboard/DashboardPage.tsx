@@ -9,13 +9,15 @@ import { VisitorForm } from './VisitorForm.tsx'
 import type { VisitorFormMode } from './VisitorForm.tsx'
 import { ShiftSummary } from './ShiftSummary.tsx'
 import { VisitorsTable } from './VisitorsTable.tsx'
+import { Button } from '../ui/Button.tsx'
 import { Notice } from '../ui/Notice.tsx'
 import type { TableState } from '../ui/DataTable.tsx'
 import { actionKeys, useBoard } from '../../hooks/useBoard.ts'
 import { formatTimeWithSeconds } from '../../lib/format.ts'
-import { buildVisitRows } from '../../lib/selectors.ts'
+import { describeAppearance } from '../../lib/labels.ts'
+import { buildVisitRows, findPendingOffer } from '../../lib/selectors.ts'
 import type { VisitRow } from '../../lib/selectors.ts'
-import type { AssociateView, AvailabilityState, Outcome, VisitorAttributes } from '../../lib/types.ts'
+import type { AvailabilityState, BoardSnapshot, Outcome, VisitorAttributes } from '../../lib/types.ts'
 import { boardService, boardServiceMode, mockController } from '../../services/index.ts'
 import type { ScenarioId } from '../../services/mockScenarios.ts'
 
@@ -48,11 +50,11 @@ export function DashboardPage() {
   /** The visit/assignment/associate join lives in one selector, not in rows. */
   const visitRows = useMemo<VisitRow[]>(() => (snapshot === null ? [] : buildVisitRows(snapshot)), [snapshot])
 
-  /** Explains a Waiting visit with no assignment, from the current roster. */
-  const waitingExplanation = useMemo(
-    () => explainWaiting(snapshot?.associates ?? []),
-    [snapshot?.associates],
-  )
+  /** Explains a Waiting visit with no assignment, from the current snapshot. */
+  const waitingExplanation = useMemo(() => (snapshot === null ? null : explainWaiting(snapshot)), [snapshot])
+
+  /** The session's one unresolved offer, if any - highlighted above the table. */
+  const pendingOffer = useMemo(() => (snapshot === null ? null : findPendingOffer(snapshot)), [snapshot])
 
   /** Always the live row, so an open dialog follows server state. */
   const activeRow = useMemo<VisitRow | null>(() => {
@@ -154,6 +156,26 @@ export function DashboardPage() {
 
       <ShiftSummary metrics={snapshot?.metrics ?? null} />
 
+      {pendingOffer !== null ? (
+        <Notice tone="info" title="One offer is pending — later arrivals wait for it">
+          <p>
+            {describeAppearance(pendingOffer.visit.attributes)} is offered to {pendingOffer.associateName}. No other
+            offer is made until this one is accepted.
+          </p>
+          <div className="mt-2">
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={mutationsBlocked}
+              pending={board.isPending(actionKeys.accept(pendingOffer.visit.visitId))}
+              onClick={() => void board.acceptUp(pendingOffer.visit.visitId, pendingOffer.assignment.assignmentId)}
+            >
+              Accept UP
+            </Button>
+          </div>
+        </Notice>
+      ) : null}
+
       <VisitorsTable
         rows={visitRows}
         state={tableState}
@@ -234,16 +256,18 @@ export function DashboardPage() {
 }
 
 /**
- * Waiting visits exist only when no participant is eligible. This states the
- * reason so the board never looks simply broken.
+ * A Waiting visit has no assignment for exactly one of two reasons: the
+ * session's one pending offer is unresolved (regardless of how many other
+ * associates are Available - that is the point of the gate), or nobody is
+ * Available at all. Accepted, unfinished work is never a reason - it does
+ * not make an associate ineligible, so it must never be implied here.
  */
-function explainWaiting(associates: readonly AssociateView[]): string | null {
-  if (associates.length === 0) return null
-  const offFloor = associates.filter((p) => p.state === 'OffFloor').length
-  const busy = associates.filter((p) => p.state === 'PendingAcceptance' || p.state === 'OnUP').length
-
-  if (offFloor === associates.length) return 'All associates are Off Floor.'
-  if (busy === associates.length) return 'All associates are busy with a turn.'
-  if (offFloor + busy === associates.length) return 'No eligible associate: the rest are busy or Off Floor.'
+function explainWaiting(snapshot: BoardSnapshot): string | null {
+  if (snapshot.assignments.some((assignment) => assignment.phase === 'PendingAcceptance')) {
+    return 'Awaiting confirmation of the one pending offer.'
+  }
+  if (!snapshot.associates.some((associate) => associate.state === 'Available')) {
+    return 'No available associates.'
+  }
   return null
 }

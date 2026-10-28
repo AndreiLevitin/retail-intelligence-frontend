@@ -5,9 +5,10 @@
 import type {
   ActivityKind,
   AgeGroup,
+  AssignmentPhase,
+  AvailabilityState,
   Gender,
   Outcome,
-  ParticipantState,
   VisitorAttributes,
   VisitStatus,
 } from './types.ts'
@@ -52,18 +53,28 @@ export const presenceTones: Record<'Inside' | 'Left', Tone> = {
   Left: 'neutral',
 }
 
-export const participantStateLabels: Record<ParticipantState, string> = {
+/** An associate's own availability - accepted/pending work has its own badge. */
+export const availabilityLabels: Record<AvailabilityState, string> = {
   Available: 'Available',
   OffFloor: 'Off Floor',
-  PendingAcceptance: 'Pending Acceptance',
-  OnUP: 'On UP',
 }
 
-export const participantStateTones: Record<ParticipantState, Tone> = {
+export const availabilityTones: Record<AvailabilityState, Tone> = {
   Available: 'success',
   OffFloor: 'neutral',
+}
+
+/** Per-assignment phase - shown separately from the associate's availability. */
+export const assignmentPhaseLabels: Record<AssignmentPhase, string> = {
+  PendingAcceptance: 'Pending Acceptance',
+  Accepted: 'Accepted',
+  Completed: 'Completed',
+}
+
+export const assignmentPhaseTones: Record<AssignmentPhase, Tone> = {
   PendingAcceptance: 'warning',
-  OnUP: 'info',
+  Accepted: 'info',
+  Completed: 'neutral',
 }
 
 /** `null` is an explicit "Not recorded", never a No-Sale. */

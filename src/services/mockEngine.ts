@@ -1,15 +1,26 @@
 /**
  * In-memory board engine for MockBoardClient.
  *
- * It follows the same transitions the real backend owns - FIFO registration,
- * one unfinished assignment per participant, bottom-of-rotation release,
- * waiting dispatch on returning capacity, state-checked idempotency, rejected
- * conflicts. The rules live here and not in components, so they exist in
- * exactly one place and can be deleted together with the mock adapter.
+ * Implements "Assignment Rotation Revision - Advance on Acceptance":
+ *  - an associate's own availability is only Available/OffFloor; accepted,
+ *    unfinished work never makes them ineligible, and multiple accepted
+ *    unfinished assignments per participant are valid
+ *  - at most ONE unresolved pending offer exists across the whole session;
+ *    later Waiting visitors wait for it regardless of how many other
+ *    associates are Available
+ *  - offering a visit never touches the offered participant's queue
+ *    position or availability; only *accepting* moves them to the bottom,
+ *    exactly once, and immediately tries the next oldest Waiting visit
+ *  - a normal outcome (Sale/No-Sale) never changes rotation or availability
+ *  - departure of a still-pending offer clears the gate without consuming
+ *    the participant's turn or moving the queue; departure of an accepted
+ *    or completed turn does not touch rotation either
  *
- * Only arrival (`eventId`) and availability (`commandId`) carry a client
- * idempotency key, matching the backend contract; accept, outcome, departure
- * and attributes are made safe to retry by checking current state instead.
+ * The rules live here and not in components, so they exist in exactly one
+ * place and can be deleted together with the mock adapter. Only arrival
+ * (`eventId`) and availability (`commandId`) carry a client idempotency key,
+ * matching the backend contract; accept, outcome, departure and attributes
+ * are made safe to retry by checking current state instead.
  *
  * Every mutation takes an explicit `at` timestamp, which keeps the seeded
  * review scenarios deterministic.
@@ -21,11 +32,11 @@ import type {
   AssignmentPhase,
   AssignmentView,
   AssociateView,
+  AvailabilityState,
   BoardSnapshot,
   CompletionReason,
   MetricsView,
   Outcome,
-  ParticipantState,
   VisitorAttributes,
   VisitStatus,
   VisitView,
@@ -42,11 +53,11 @@ interface MockParticipant {
   participantId: string
   associateId: string
   displayName: string
-  state: ParticipantState
+  state: AvailabilityState
   queuePosition: number | null
+  /** Created offers, including ones later closed by early departure. */
   assignedTurns: number
   acceptedTurns: number
-  currentAssignmentId: string | null
 }
 
 interface MockAssignment {
@@ -139,7 +150,6 @@ export function createSession(sessionId: string, startedAt: string): MockState {
       queuePosition: state.nextQueuePosition++,
       assignedTurns: 0,
       acceptedTurns: 0,
-      currentAssignmentId: null,
     })
   }
 
@@ -187,7 +197,12 @@ function findAssignment(state: MockState, assignmentId: string): MockAssignment 
   return assignment
 }
 
-/** The unfinished assignment of a visit, if there is one. */
+/** The one unresolved offer across the whole session, if any. */
+function pendingOffer(state: MockState): MockAssignment | undefined {
+  return state.assignments.find((a) => a.acceptedAt === null && a.completedAt === null)
+}
+
+/** The unfinished (pending or accepted) assignment of a visit, if there is one. */
 function openAssignmentOfVisit(state: MockState, visitId: string): MockAssignment | undefined {
   return state.assignments.find((a) => a.visitId === visitId && a.completedAt === null)
 }
@@ -203,15 +218,26 @@ function eligibleParticipants(state: MockState): MockParticipant[] {
     .sort((a, b) => (a.queuePosition ?? 0) - (b.queuePosition ?? 0))
 }
 
-/** Appends a released or returning participant to the bottom of rotation. */
+/** Appends a returning or just-accepted participant to the bottom of rotation. */
 function appendToQueue(state: MockState, participant: MockParticipant): void {
   participant.state = 'Available'
   participant.queuePosition = state.nextQueuePosition++
-  participant.currentAssignmentId = null
 }
 
-/** Reserves the first eligible participant. Returns false when none exists. */
-function reserveFor(state: MockState, visit: MockVisit, at: string): boolean {
+/**
+ * Creates the session's one offer, if none is currently unresolved: the
+ * oldest Waiting visit to the front-of-queue Available participant. Offering
+ * never moves the participant or changes their availability - only accepting
+ * does that. Returns true when an offer was created.
+ */
+function tryCreateOffer(state: MockState, at: string): boolean {
+  if (pendingOffer(state) !== undefined) return false
+
+  const visit = state.visits
+    .filter((v) => v.status === 'Waiting' && v.departedAt === null)
+    .sort((a, b) => a.registrationOrder - b.registrationOrder)[0]
+  if (visit === undefined) return false
+
   const participant = eligibleParticipants(state)[0]
   if (participant === undefined) return false
 
@@ -225,48 +251,15 @@ function reserveFor(state: MockState, visit: MockVisit, at: string): boolean {
     completionReason: null,
   }
   state.assignments.push(assignment)
-
-  participant.state = 'PendingAcceptance'
-  participant.queuePosition = null
-  participant.currentAssignmentId = assignment.assignmentId
   participant.assignedTurns += 1
-
   visit.status = 'Assigned'
 
-  logAt(state, at, 'AssignmentCreated', `UP assigned to ${participant.displayName}.`, {
+  logAt(state, at, 'AssignmentCreated', `UP offered to ${participant.displayName}.`, {
     visitId: visit.visitId,
     participantId: participant.participantId,
     assignmentId: assignment.assignmentId,
   })
   return true
-}
-
-/**
- * Assigns Waiting visits in server registration order while capacity exists.
- * Runs after every event that can free a participant.
- */
-function dispatchWaiting(state: MockState, at: string): void {
-  const waiting = state.visits
-    .filter((visit) => visit.status === 'Waiting' && visit.departedAt === null)
-    .sort((a, b) => a.registrationOrder - b.registrationOrder)
-
-  for (const visit of waiting) {
-    if (!reserveFor(state, visit, at)) break
-  }
-}
-
-/** Closes the open assignment of a visit and releases the participant once. */
-function closeOpenAssignment(state: MockState, visitId: string, reason: CompletionReason, at: string): void {
-  const assignment = openAssignmentOfVisit(state, visitId)
-  if (assignment === undefined) return
-
-  assignment.completedAt = at
-  assignment.completionReason = reason
-
-  const participant = state.participants.find((p) => p.participantId === assignment.participantId)
-  if (participant !== undefined && participant.currentAssignmentId === assignment.assignmentId) {
-    appendToQueue(state, participant)
-  }
 }
 
 /* -------------------------------------------------------------- commands */
@@ -305,8 +298,9 @@ export function registerVisitor(
   state.eventIdToVisitId.set(input.eventId, visit.visitId)
   logAt(state, at, 'ArrivalRecorded', 'Visitor registered manually.', { visitId: visit.visitId })
 
-  // Reserved immediately; the visit stays Waiting when nobody is eligible.
-  reserveFor(state, visit, at)
+  // Offers the oldest Waiting visit (which may not be this one, if an
+  // earlier arrival is still waiting) - stays Waiting if no offer can be made.
+  tryCreateOffer(state, at)
   return { visitId: visit.visitId, duplicate: false, status: visit.status }
 }
 
@@ -334,7 +328,8 @@ export function acceptAssignment(
   // Already accepted: a blind retry reports replayed, no further effect.
   if (assignment.acceptedAt !== null) return
   if (assignment.completedAt !== null) {
-    throw new BoardError('Conflict', 'That turn is already closed.', {
+    // Closed by an early departure before acceptance: never fabricate one.
+    throw new BoardError('Conflict', 'That offer was already closed by a departure.', {
       retryable: false,
       apiCode: 'INVALID_TRANSITION',
     })
@@ -352,14 +347,20 @@ export function acceptAssignment(
   visit.status = 'Accepted'
 
   const participant = findParticipant(state, assignment.participantId)
-  participant.state = 'OnUP'
   participant.acceptedTurns += 1
+  // Advances the queue exactly once, on acceptance - never on offer, outcome
+  // or departure. Accepted, unfinished work never blocks future offers to
+  // this same participant.
+  appendToQueue(state, participant)
 
   logAt(state, at, 'AssignmentAccepted', `${participant.displayName} accepted the UP.`, {
     visitId: visit.visitId,
     participantId: participant.participantId,
     assignmentId: assignment.assignmentId,
   })
+
+  // The gate is clear: offer the next oldest Waiting visit, if any.
+  tryCreateOffer(state, at)
 }
 
 export function recordOutcome(
@@ -380,6 +381,7 @@ export function recordOutcome(
     })
   }
   if (assignment.acceptedAt === null || assignment.completedAt !== null) {
+    // A turn closed by departure before acceptance cannot receive an outcome.
     throw new BoardError('Conflict', 'Only an accepted, unfinished turn can record an outcome.', {
       retryable: false,
       apiCode: 'INVALID_TRANSITION',
@@ -391,15 +393,16 @@ export function recordOutcome(
   // The turn is complete, but the visitor stays Inside until Mark Exit.
   visit.status = 'Completed'
 
-  closeOpenAssignment(state, visit.visitId, 'OutcomeRecorded', at)
+  assignment.completedAt = at
+  assignment.completionReason = 'OutcomeRecorded'
+  // Rotation/availability are untouched: acceptance already advanced the
+  // queue, and a normal outcome never moves it again.
 
   logAt(state, at, 'TurnCompleted', input.outcome === 'Sale' ? 'Sale recorded.' : 'No-Sale recorded.', {
     visitId: visit.visitId,
     participantId: assignment.participantId,
     assignmentId: assignment.assignmentId,
   })
-
-  dispatchWaiting(state, at)
 }
 
 export function markDeparture(
@@ -442,20 +445,28 @@ export function markDeparture(
   visit.departedAt = at
   visit.status = 'Completed'
 
-  // Already-completed service does not touch the participant or the queue,
-  // even if that participant now serves another visitor.
   if (!wasAlreadyComplete) {
-    closeOpenAssignment(state, visit.visitId, 'Departure', at)
+    const assignment = openAssignmentOfVisit(state, visit.visitId)
+    if (assignment !== undefined) {
+      assignment.completedAt = at
+      assignment.completionReason = 'Departure'
+      // Pending-offer departure clears the gate without consuming the
+      // participant's turn or moving the queue. An accepted-but-unfinished
+      // departure likewise never touches rotation - acceptance already
+      // moved that participant once, and this does not move them again.
+    }
   }
 
   logAt(state, at, 'VisitorDeparted', 'Visitor exit recorded.', { visitId: visit.visitId })
 
-  if (!wasAlreadyComplete) dispatchWaiting(state, at)
+  // Harmless no-op unless this departure was the pending offer: then the
+  // gate just cleared and the next oldest Waiting visit can be offered.
+  if (!wasAlreadyComplete) tryCreateOffer(state, at)
 }
 
 export function setAvailability(
   state: MockState,
-  input: { sessionId: string; participantId: string; commandId: string; state: 'Available' | 'OffFloor' },
+  input: { sessionId: string; participantId: string; commandId: string; state: AvailabilityState },
   at: string,
 ): void {
   requireSession(state, input.sessionId)
@@ -466,15 +477,21 @@ export function setAvailability(
 
   const participant = findParticipant(state, input.participantId)
 
-  if (participant.state === 'PendingAcceptance' || participant.state === 'OnUP') {
-    throw new BoardError('Conflict', 'Only an idle associate can change availability.', {
-      retryable: false,
-      apiCode: 'INVALID_TRANSITION',
-    })
-  }
+  // Request to set a participant to their existing state is a no-op: keep
+  // queue position, append no activity, but the command is still recorded
+  // (the replay guard above already did that).
   if (participant.state === input.state) return
 
   if (input.state === 'OffFloor') {
+    // Rejected only while this participant owns the one unresolved pending
+    // offer; accepted, unfinished work never blocks it.
+    const offer = pendingOffer(state)
+    if (offer !== undefined && offer.participantId === participant.participantId) {
+      throw new BoardError('Conflict', 'Resolve the pending offer before marking Off Floor.', {
+        retryable: false,
+        apiCode: 'INVALID_TRANSITION',
+      })
+    }
     participant.state = 'OffFloor'
     participant.queuePosition = null
   } else {
@@ -489,7 +506,9 @@ export function setAvailability(
     { participantId: participant.participantId },
   )
 
-  if (input.state === 'Available') dispatchWaiting(state, at)
+  // Returning Available attempts a dispatch; it is a no-op if a different
+  // offer is already pending.
+  if (input.state === 'Available') tryCreateOffer(state, at)
 }
 
 /* -------------------------------------------------------------- snapshot */
@@ -554,14 +573,19 @@ function toAssignmentView(assignment: MockAssignment): AssignmentView {
   }
 }
 
-function toAssociateView(participant: MockParticipant): AssociateView {
+function toAssociateView(state: MockState, participant: MockParticipant): AssociateView {
+  const own = state.assignments.filter((a) => a.participantId === participant.participantId)
+  const pending = own.find((a) => a.acceptedAt === null && a.completedAt === null)
+  const active = own.filter((a) => a.acceptedAt !== null && a.completedAt === null)
   return {
     participantId: participant.participantId,
     associateId: participant.associateId,
     displayName: participant.displayName,
     state: participant.state,
     queuePosition: participant.queuePosition,
-    currentAssignmentId: participant.currentAssignmentId,
+    pendingAssignmentId: pending?.assignmentId ?? null,
+    activeAssignmentIds: active.map((a) => a.assignmentId),
+    activeTurns: active.length,
     assignedTurns: participant.assignedTurns,
     acceptedTurns: participant.acceptedTurns,
   }
@@ -570,7 +594,7 @@ function toAssociateView(participant: MockParticipant): AssociateView {
 export function toSnapshot(state: MockState, serverTime: string): BoardSnapshot {
   return {
     session: { sessionId: state.sessionId, startedAt: state.startedAt },
-    associates: state.participants.map(toAssociateView),
+    associates: state.participants.map((participant) => toAssociateView(state, participant)),
     visits: [...state.visits]
       .sort((a, b) => a.registrationOrder - b.registrationOrder)
       .map((visit) => toVisitView(state, visit)),
