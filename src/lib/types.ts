@@ -3,187 +3,194 @@
  * separate Vercel API. These shapes are what BoardService returns, for both
  * the mock and the HTTP adapter.
  *
- * `Prototype Design.md` / `Design Class Diagram.md` are not in the repository
- * yet, so the names below follow the vocabulary used by
- * `Frontend and UI Requirements.md` and `Prototype Backlog.md`. The machine
- * values are the ones the UI sends and must be confirmed against the backend;
- * see README "Remaining API integration work".
+ * This file mirrors the backend's canonical, dependency-free contract at
+ * `retail-intelligence-backend/src/contracts/dto.ts` (itself following
+ * "Prototype Design.md" Public DTOs and "Backend Requirements.md" section 6).
+ * The two repos are separate deployments, so the shapes are copied rather
+ * than imported; if the backend contract changes, update this file to match
+ * and do not drift the public shape unilaterally from the frontend side.
  */
 
-/* ------------------------------------------------------------------ enums */
+/* ------------------------------------------------------------ enum values */
 
-export const AgeGroups = ['Under20', 'From20To39', 'From40To59', 'Over60', 'Unknown'] as const
+export const ParticipantStates = ['Available', 'OffFloor', 'PendingAcceptance', 'OnUP'] as const
+export type ParticipantState = (typeof ParticipantStates)[number]
+
+/** States an operator may request for an idle participant. */
+export const AvailabilityStates = ['Available', 'OffFloor'] as const
+export type AvailabilityState = (typeof AvailabilityStates)[number]
+
+export const AssignmentPhases = ['PendingAcceptance', 'Accepted', 'Completed'] as const
+export type AssignmentPhase = (typeof AssignmentPhases)[number]
+
+export const CompletionReasons = ['OutcomeRecorded', 'Departure'] as const
+export type CompletionReason = (typeof CompletionReasons)[number]
+
+export const Outcomes = ['Sale', 'NoSale'] as const
+export type Outcome = (typeof Outcomes)[number]
+
+export const VisitStatuses = ['Waiting', 'Assigned', 'Accepted', 'Completed'] as const
+export type VisitStatus = (typeof VisitStatuses)[number]
+
+/** How the visit entered the system. Only `Manual` is produced in stage 1. */
+export const VisitSources = ['CV', 'Manual'] as const
+export type VisitSource = (typeof VisitSources)[number]
+
+export const AgeGroups = ['Under20', 'From20To39', 'From40To59', 'Age60Plus', 'Unknown'] as const
 export type AgeGroup = (typeof AgeGroups)[number]
 
 export const Genders = ['Female', 'Male', 'Unknown'] as const
 export type Gender = (typeof Genders)[number]
 
-/** How the visit entered the system. Only `Manual` is produced in stage 1. */
-export type VisitSource = 'Manual' | 'CV'
-
-/** Whose values the stored profile holds. Manual wins over future CV estimates. */
-export type AttributesSource = 'Manual' | 'CV'
+/** Whose values the stored attributes hold. Manual wins over future CV estimates. */
+export const AttributesSources = ['Manual', 'CV', 'Unknown'] as const
+export type AttributesSource = (typeof AttributesSources)[number]
 
 /** CV enrichment lifecycle. Stage 1 manual path always writes `NotRequested`. */
-export type EnrichmentStatus = 'NotRequested' | 'Pending' | 'Completed' | 'Failed'
+export const EnrichmentStatuses = ['Pending', 'Complete', 'Failed', 'NotRequested'] as const
+export type EnrichmentStatus = (typeof EnrichmentStatuses)[number]
 
-/** Service lifecycle of a visit. Independent of physical presence. */
-export type ServiceStatus = 'Waiting' | 'Assigned' | 'Accepted' | 'Completed'
+export const ActivityKinds = [
+  'ArrivalRecorded',
+  'AssignmentCreated',
+  'AssignmentAccepted',
+  'TurnCompleted',
+  'AvailabilityChanged',
+  'VisitorAttributesUpdated',
+  'VisitorDeparted',
+] as const
+export type ActivityKind = (typeof ActivityKinds)[number]
 
-/** Physical presence, derived from `departedAt` - never from serviceStatus. */
-export type Presence = 'Inside' | 'Left'
+/** Maximum length (Unicode code points) of each description field. */
+export const DESCRIPTION_MAX_LENGTH = 200
 
-/** Purchase outcome. `null` means not recorded; it is never a No-Sale. */
-export type PurchaseResult = 'Sale' | 'NoSale'
+/* ------------------------------------------------------------- read model */
 
-export type ParticipantState = 'Available' | 'OffFloor' | 'PendingAcceptance' | 'OnUP'
-
-export type AssignmentCompletionReason = 'OutcomeRecorded' | 'Departure'
-
-export type ActivityKind =
-  | 'SessionStarted'
-  | 'VisitRegistered'
-  | 'AssignmentCreated'
-  | 'AssignmentAccepted'
-  | 'OutcomeRecorded'
-  | 'VisitDeparted'
-  | 'ProfileUpdated'
-  | 'AvailabilityChanged'
-  | 'SessionReset'
-
-/* -------------------------------------------------------------------- DTOs */
-
-export interface VisitorProfileDto {
-  /** Free text; may be empty when the receptionist cannot describe it. */
-  upperDescription: string
-  lowerDescription: string
-  /** Optional accessory. */
-  accessory: string
-  ageGroup: AgeGroup
-  gender: Gender
+export interface SessionContext {
+  sessionId: string
+  startedAt: string
 }
 
-export interface AssignmentDto {
-  assignmentId: string
-  participantId: string
-  /** Denormalised for display so rows do not join tables themselves. */
-  participantName: string
-  assignedAt: string
-  acceptedAt: string | null
-  completedAt: string | null
-  completionReason: AssignmentCompletionReason | null
-}
-
-export interface VisitDto {
-  visitId: string
-  /** Server FIFO registration order; the default table order. */
-  registrationOrder: number
-  source: VisitSource
-  attributesSource: AttributesSource
-  enrichmentStatus: EnrichmentStatus
-  profile: VisitorProfileDto
-  /** Server-set entry time (UTC). */
-  arrivedAt: string
-  /** Server-set exit time (UTC), or null while the visitor is inside. */
-  departedAt: string | null
-  serviceStatus: ServiceStatus
-  purchaseResult: PurchaseResult | null
-  purchaseRecordedAt: string | null
-  /** The current unfinished assignment, or the last closed one, if any. */
-  assignment: AssignmentDto | null
-}
-
-export interface ParticipantDto {
+export interface AssociateView {
   participantId: string
   /** Stable roster identity, kept across demo resets. */
   associateId: string
   displayName: string
   state: ParticipantState
-  /** Rotation order among eligible participants; null when not eligible. */
+  /** 1-based rank among Available participants; null unless Available. */
   queuePosition: number | null
-  assignedCount: number
-  acceptedCount: number
-  /** Visit the participant is currently reserved for, if any. */
-  currentVisitId: string | null
+  /** Unfinished assignment of this participant; null when idle. */
+  currentAssignmentId: string | null
+  assignedTurns: number
+  acceptedTurns: number
 }
 
-export interface SessionDto {
-  sessionId: string
-  startedAt: string
+export interface VisitorAttributes {
+  /** Trimmed; empty string means "not known". */
+  upperDescription: string
+  lowerDescription: string
+  /** Trimmed; null when absent (empty input is normalized to null). */
+  accessoryDescription: string | null
+  ageGroup: AgeGroup
+  gender: Gender
 }
 
-export interface MetricsDto {
+export interface VisitView {
+  visitId: string
+  /** Server registration (entry) time. */
+  arrivedAt: string
+  /** Separate CV observation time; always null in Stage 1. */
+  detectedAt: string | null
+  /** Registered exit time; presence is Inside while null, Left otherwise. */
+  departedAt: string | null
+  source: VisitSource
+  status: VisitStatus
+  attributes: VisitorAttributes
+  attributesSource: AttributesSource
+  enrichmentStatus: EnrichmentStatus
+  outcome: Outcome | null
+  outcomeRecordedAt: string | null
+  /** 1-based FIFO rank among Waiting visitors still inside; otherwise null. */
+  waitingPosition: number | null
+  assignmentId: string | null
+}
+
+export interface AssignmentView {
+  assignmentId: string
+  visitId: string
+  participantId: string
+  /** Derived: completedAt -> Completed, acceptedAt -> Accepted, else PendingAcceptance. */
+  phase: AssignmentPhase
+  assignedAt: string
+  acceptedAt: string | null
+  completedAt: string | null
+  completionReason: CompletionReason | null
+}
+
+export interface MetricsView {
   visitors: number
   assignedTurns: number
   acceptedTurns: number
   closedSales: number
-  /** 0..1; formatted for display by the UI. */
+  /** Sale visits / all visits * 100 (0 when there are no visits); not rounded. */
   conversionRate: number
 }
 
-export interface ActivityEntryDto {
-  entryId: string
+export interface ActivityView {
+  activityId: string
   occurredAt: string
   kind: ActivityKind
-  message: string
-  visitId?: string
-  participantId?: string
+  description: string
+  visitId: string | null
+  participantId: string | null
+  assignmentId: string | null
 }
 
-/** One read of the whole board. The UI renders snapshots, never fragments. */
+/**
+ * GET /api/board. Associates are in stable initial roster order, visits and
+ * assignments in server registration order of their visits, activity newest
+ * first. The frontend never derives order itself: it is the array order.
+ */
 export interface BoardSnapshot {
-  session: SessionDto
-  participants: ParticipantDto[]
-  visits: VisitDto[]
-  metrics: MetricsDto
-  /** Newest first. */
-  activity: ActivityEntryDto[]
+  session: SessionContext
+  associates: AssociateView[]
+  visits: VisitView[]
+  assignments: AssignmentView[]
+  metrics: MetricsView
+  activity: ActivityView[]
   serverTime: string
-  /** Monotonic per session; used to drop out-of-order snapshots. */
-  revision: number
 }
 
 /* ---------------------------------------------------------------- derived */
 
-export function presenceOf(visit: VisitDto): Presence {
+export function presenceOf(visit: VisitView): 'Inside' | 'Left' {
   return visit.departedAt === null ? 'Inside' : 'Left'
 }
 
-/** Next UP = first eligible participant by queuePosition. */
-export function nextUpParticipantId(participants: ParticipantDto[]): string | null {
-  const eligible = participants
+/** Next UP = first eligible associate by queuePosition. */
+export function nextUpParticipantId(associates: readonly AssociateView[]): string | null {
+  const eligible = associates
     .filter((p) => p.state === 'Available' && p.queuePosition !== null)
     .sort((a, b) => (a.queuePosition ?? 0) - (b.queuePosition ?? 0))
   return eligible[0]?.participantId ?? null
 }
 
 /** Accept UP is only offered for a pending assignment of a visitor still inside. */
-export function canAcceptUp(visit: VisitDto): boolean {
-  return (
-    visit.serviceStatus === 'Assigned' &&
-    visit.departedAt === null &&
-    visit.assignment !== null &&
-    visit.assignment.acceptedAt === null &&
-    visit.assignment.completedAt === null
-  )
+export function canAcceptUp(visit: VisitView): boolean {
+  return visit.status === 'Assigned' && visit.departedAt === null && visit.assignmentId !== null
 }
 
 /** Sale / No-Sale is only offered for an accepted, unfinished turn. */
-export function canRecordOutcome(visit: VisitDto): boolean {
-  return (
-    visit.serviceStatus === 'Accepted' &&
-    visit.assignment !== null &&
-    visit.assignment.acceptedAt !== null &&
-    visit.assignment.completedAt === null
-  )
+export function canRecordOutcome(visit: VisitView): boolean {
+  return visit.status === 'Accepted' && visit.assignmentId !== null
 }
 
 /** Mark Exit is available for any visit that has not departed yet. */
-export function canMarkExit(visit: VisitDto): boolean {
+export function canMarkExit(visit: VisitView): boolean {
   return visit.departedAt === null
 }
 
 /** Availability can only be changed for an idle participant. */
-export function isIdle(participant: ParticipantDto): boolean {
-  return participant.state === 'Available' || participant.state === 'OffFloor'
+export function isIdle(associate: AssociateView): boolean {
+  return associate.state === 'Available' || associate.state === 'OffFloor'
 }

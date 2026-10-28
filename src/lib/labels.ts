@@ -6,11 +6,10 @@ import type {
   ActivityKind,
   AgeGroup,
   Gender,
+  Outcome,
   ParticipantState,
-  Presence,
-  PurchaseResult,
-  ServiceStatus,
-  VisitorProfileDto,
+  VisitorAttributes,
+  VisitStatus,
 } from './types.ts'
 
 export type Tone = 'success' | 'warning' | 'danger' | 'info' | 'neutral' | 'muted'
@@ -19,7 +18,7 @@ export const ageGroupLabels: Record<AgeGroup, string> = {
   Under20: '<20',
   From20To39: '20-39',
   From40To59: '40-59',
-  Over60: '60+',
+  Age60Plus: '60+',
   Unknown: 'Unknown',
 }
 
@@ -29,26 +28,26 @@ export const genderLabels: Record<Gender, string> = {
   Unknown: 'Unknown',
 }
 
-export const serviceStatusLabels: Record<ServiceStatus, string> = {
+export const visitStatusLabels: Record<VisitStatus, string> = {
   Waiting: 'Waiting',
   Assigned: 'Assigned',
   Accepted: 'Accepted',
   Completed: 'Completed',
 }
 
-export const serviceStatusTones: Record<ServiceStatus, Tone> = {
+export const visitStatusTones: Record<VisitStatus, Tone> = {
   Waiting: 'warning',
   Assigned: 'info',
   Accepted: 'info',
   Completed: 'neutral',
 }
 
-export const presenceLabels: Record<Presence, string> = {
+export const presenceLabels: Record<'Inside' | 'Left', string> = {
   Inside: 'Inside',
   Left: 'Left',
 }
 
-export const presenceTones: Record<Presence, Tone> = {
+export const presenceTones: Record<'Inside' | 'Left', Tone> = {
   Inside: 'neutral',
   Left: 'neutral',
 }
@@ -68,28 +67,26 @@ export const participantStateTones: Record<ParticipantState, Tone> = {
 }
 
 /** `null` is an explicit "Not recorded", never a No-Sale. */
-export function purchaseResultLabel(result: PurchaseResult | null): string {
-  if (result === 'Sale') return 'Sale'
-  if (result === 'NoSale') return 'No-Sale'
+export function outcomeLabel(outcome: Outcome | null): string {
+  if (outcome === 'Sale') return 'Sale'
+  if (outcome === 'NoSale') return 'No-Sale'
   return 'Not recorded'
 }
 
-export function purchaseResultTone(result: PurchaseResult | null): Tone {
-  if (result === 'Sale') return 'success'
-  if (result === 'NoSale') return 'neutral'
+export function outcomeTone(outcome: Outcome | null): Tone {
+  if (outcome === 'Sale') return 'success'
+  if (outcome === 'NoSale') return 'neutral'
   return 'muted'
 }
 
 export const activityKindLabels: Record<ActivityKind, string> = {
-  SessionStarted: 'Session started',
-  VisitRegistered: 'Visitor registered',
+  ArrivalRecorded: 'Visitor registered',
   AssignmentCreated: 'UP assigned',
   AssignmentAccepted: 'UP accepted',
-  OutcomeRecorded: 'Outcome recorded',
-  VisitDeparted: 'Visitor left',
-  ProfileUpdated: 'Attributes updated',
+  TurnCompleted: 'Outcome recorded',
   AvailabilityChanged: 'Availability changed',
-  SessionReset: 'Demo reset',
+  VisitorAttributesUpdated: 'Attributes updated',
+  VisitorDeparted: 'Visitor left',
 }
 
 export const NO_DESCRIPTION = 'Description not provided'
@@ -98,8 +95,8 @@ export const NO_DESCRIPTION = 'Description not provided'
  * Joins only the known, non-empty appearance parts. Never fabricates text and
  * never substitutes a demographic guess.
  */
-export function describeAppearance(profile: VisitorProfileDto): string {
-  const parts = [profile.upperDescription, profile.lowerDescription, profile.accessory]
+export function describeAppearance(attributes: VisitorAttributes): string {
+  const parts = [attributes.upperDescription, attributes.lowerDescription, attributes.accessoryDescription ?? '']
     .map((part) => part.trim())
     .filter((part) => part.length > 0)
   return parts.length > 0 ? parts.join(' / ') : NO_DESCRIPTION

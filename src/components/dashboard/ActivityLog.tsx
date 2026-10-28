@@ -1,10 +1,10 @@
 import { useState } from 'react'
 import { formatTimeWithSeconds } from '../../lib/format.ts'
 import { activityKindLabels } from '../../lib/labels.ts'
-import type { ActivityEntryDto } from '../../lib/types.ts'
+import type { ActivityView } from '../../lib/types.ts'
 
 interface ActivityLogProps {
-  entries: readonly ActivityEntryDto[]
+  entries: readonly ActivityView[]
 }
 
 /**
@@ -39,14 +39,14 @@ export function ActivityLog({ entries }: ActivityLogProps) {
           ) : (
             entries.map((entry) => (
               <li
-                key={entry.entryId}
+                key={entry.activityId}
                 className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-line px-4 py-2 last:border-b-0"
               >
                 <span className="w-20 shrink-0 font-mono text-label text-muted">
                   {formatTimeWithSeconds(entry.occurredAt)}
                 </span>
                 <span className="text-label font-medium text-muted">{activityKindLabels[entry.kind]}</span>
-                <span className="text-body text-ink">{entry.message}</span>
+                <span className="text-body text-ink">{entry.description}</span>
               </li>
             ))
           )}

@@ -5,19 +5,16 @@ import type { Column, TableState } from '../ui/DataTable.tsx'
 import { StatusBadge } from '../ui/StatusBadge.tsx'
 import { participantStateLabels, participantStateTones } from '../../lib/labels.ts'
 import { isIdle, nextUpParticipantId } from '../../lib/types.ts'
-import type { ParticipantDto, ParticipantState } from '../../lib/types.ts'
+import type { AssociateView, AvailabilityState } from '../../lib/types.ts'
 import { actionKeys } from '../../hooks/useBoard.ts'
 
 interface AssociatesTableProps {
-  participants: readonly ParticipantDto[]
+  associates: readonly AssociateView[]
   state: TableState
   errorMessage?: string
   mutationsBlocked: boolean
   isPending: (key: string) => boolean
-  onSetAvailability: (
-    participant: ParticipantDto,
-    next: Extract<ParticipantState, 'Available' | 'OffFloor'>,
-  ) => void
+  onSetAvailability: (associate: AssociateView, next: AvailabilityState) => void
 }
 
 /**
@@ -25,30 +22,30 @@ interface AssociatesTableProps {
  * sorting control, and returning Available always joins the bottom.
  */
 export function AssociatesTable({
-  participants,
+  associates,
   state,
   errorMessage,
   mutationsBlocked,
   isPending,
   onSetAvailability,
 }: AssociatesTableProps) {
-  const nextUpId = useMemo(() => nextUpParticipantId([...participants]), [participants])
+  const nextUpId = useMemo(() => nextUpParticipantId(associates), [associates])
 
-  const columns = useMemo<Column<ParticipantDto>[]>(
+  const columns = useMemo<Column<AssociateView>[]>(
     () => [
       {
         key: 'name',
         header: 'Associate',
         width: 'w-56',
-        cell: (participant) => <span className="font-medium text-ink">{participant.displayName}</span>,
+        cell: (associate) => <span className="font-medium text-ink">{associate.displayName}</span>,
       },
       {
         key: 'state',
         header: 'State',
         width: 'w-44',
-        cell: (participant) => (
-          <StatusBadge tone={participantStateTones[participant.state]}>
-            {participantStateLabels[participant.state]}
+        cell: (associate) => (
+          <StatusBadge tone={participantStateTones[associate.state]}>
+            {participantStateLabels[associate.state]}
           </StatusBadge>
         ),
       },
@@ -56,14 +53,14 @@ export function AssociatesTable({
         key: 'queue',
         header: 'Queue',
         width: 'w-36',
-        cell: (participant) => {
-          if (participant.queuePosition === null) {
+        cell: (associate) => {
+          if (associate.queuePosition === null) {
             return <span className="text-muted">Not in rotation</span>
           }
-          return participant.participantId === nextUpId ? (
+          return associate.participantId === nextUpId ? (
             <StatusBadge tone="info">Next UP</StatusBadge>
           ) : (
-            <span className="text-ink">Position {participant.queuePosition}</span>
+            <span className="text-ink">Position {associate.queuePosition}</span>
           )
         },
       },
@@ -72,35 +69,34 @@ export function AssociatesTable({
         header: 'Assigned',
         width: 'w-24',
         align: 'right',
-        cell: (participant) => <span className="text-ink">{participant.assignedCount}</span>,
+        cell: (associate) => <span className="text-ink">{associate.assignedTurns}</span>,
       },
       {
         key: 'accepted',
         header: 'Accepted',
         width: 'w-24',
         align: 'right',
-        cell: (participant) => <span className="text-ink">{participant.acceptedCount}</span>,
+        cell: (associate) => <span className="text-ink">{associate.acceptedTurns}</span>,
       },
       {
         key: 'actions',
         header: 'Availability actions',
         headerHidden: true,
         width: 'w-56',
-        cell: (participant) => {
+        cell: (associate) => {
           // Pending Acceptance and On UP are not idle, so availability is
           // locked rather than hidden - the reason stays visible.
-          if (!isIdle(participant)) {
+          if (!isIdle(associate)) {
             return <span className="text-label text-muted">Busy — availability locked</span>
           }
-          const next: Extract<ParticipantState, 'Available' | 'OffFloor'> =
-            participant.state === 'Available' ? 'OffFloor' : 'Available'
+          const next: AvailabilityState = associate.state === 'Available' ? 'OffFloor' : 'Available'
           return (
             <Button
               size="sm"
               variant="secondary"
               disabled={mutationsBlocked}
-              pending={isPending(actionKeys.availability(participant.participantId))}
-              onClick={() => onSetAvailability(participant, next)}
+              pending={isPending(actionKeys.availability(associate.participantId))}
+              onClick={() => onSetAvailability(associate, next)}
             >
               {next === 'OffFloor' ? 'Mark Off Floor' : 'Mark Available'}
             </Button>
@@ -124,8 +120,8 @@ export function AssociatesTable({
       <DataTable
         caption="Predefined associates and their rotation state"
         columns={columns}
-        rows={participants}
-        rowKey={(participant) => participant.participantId}
+        rows={associates}
+        rowKey={(associate) => associate.participantId}
         state={state}
         errorMessage={errorMessage}
         emptyMessage="No associates in this session."

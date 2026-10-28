@@ -9,23 +9,19 @@ import {
   ageGroupLabels,
   describeAppearance,
   genderLabels,
+  outcomeLabel,
+  outcomeTone,
   presenceLabels,
   presenceTones,
-  purchaseResultLabel,
-  purchaseResultTone,
-  serviceStatusLabels,
-  serviceStatusTones,
+  visitStatusLabels,
+  visitStatusTones,
 } from '../../lib/labels.ts'
-import {
-  canAcceptUp,
-  canMarkExit,
-  canRecordOutcome,
-  presenceOf,
-} from '../../lib/types.ts'
-import type { PurchaseResult, ServiceStatus, VisitDto } from '../../lib/types.ts'
+import { canAcceptUp, canMarkExit, canRecordOutcome, presenceOf } from '../../lib/types.ts'
+import type { VisitRow } from '../../lib/selectors.ts'
+import type { Outcome, VisitStatus } from '../../lib/types.ts'
 import { actionKeys } from '../../hooks/useBoard.ts'
 
-type ServiceFilter = 'All' | ServiceStatus
+type ServiceFilter = 'All' | VisitStatus
 type PresenceFilter = 'All' | 'Inside' | 'Left'
 
 const SERVICE_FILTER_OPTIONS: ReadonlyArray<{ value: ServiceFilter; label: string }> = [
@@ -43,7 +39,7 @@ const PRESENCE_FILTER_OPTIONS: ReadonlyArray<{ value: PresenceFilter; label: str
 ]
 
 interface VisitorsTableProps {
-  visits: readonly VisitDto[]
+  rows: readonly VisitRow[]
   state: TableState
   errorMessage?: string
   /** True while a reset is in flight: every row action is blocked. */
@@ -51,10 +47,10 @@ interface VisitorsTableProps {
   isPending: (key: string) => boolean
   /** Why a Waiting visit has no assignment right now. */
   waitingExplanation: string | null
-  onAccept: (visit: VisitDto) => void
-  onRecordOutcome: (visit: VisitDto, result: PurchaseResult) => void
-  onMarkExit: (visit: VisitDto) => void
-  onEditProfile: (visit: VisitDto) => void
+  onAccept: (row: VisitRow) => void
+  onRecordOutcome: (row: VisitRow, outcome: Outcome) => void
+  onMarkExit: (row: VisitRow) => void
+  onEditAttributes: (row: VisitRow) => void
 }
 
 /**
@@ -65,7 +61,7 @@ interface VisitorsTableProps {
  * Filters change presentation only - they never touch metrics or the data.
  */
 export function VisitorsTable({
-  visits,
+  rows,
   state,
   errorMessage,
   mutationsBlocked,
@@ -74,45 +70,41 @@ export function VisitorsTable({
   onAccept,
   onRecordOutcome,
   onMarkExit,
-  onEditProfile,
+  onEditAttributes,
 }: VisitorsTableProps) {
   const [serviceFilter, setServiceFilter] = useState<ServiceFilter>('All')
   const [presenceFilter, setPresenceFilter] = useState<PresenceFilter>('All')
 
-  const rows = useMemo(
+  const filteredRows = useMemo(
     () =>
-      visits.filter((visit) => {
-        if (serviceFilter !== 'All' && visit.serviceStatus !== serviceFilter) return false
-        if (presenceFilter !== 'All' && presenceOf(visit) !== presenceFilter) return false
+      rows.filter((row) => {
+        if (serviceFilter !== 'All' && row.visit.status !== serviceFilter) return false
+        if (presenceFilter !== 'All' && presenceOf(row.visit) !== presenceFilter) return false
         return true
       }),
-    [presenceFilter, serviceFilter, visits],
+    [presenceFilter, rows, serviceFilter],
   )
 
-  const columns = useMemo<Column<VisitDto>[]>(
+  const columns = useMemo<Column<VisitRow>[]>(
     () => [
       {
         key: 'appearance',
         header: 'Appearance',
         width: 'w-72',
-        cell: (visit) => (
+        cell: ({ visit }) => (
           <div className="flex flex-col gap-1">
-            <span className="text-ink">{describeAppearance(visit.profile)}</span>
+            <span className="text-ink">{describeAppearance(visit.attributes)}</span>
             <details className="text-label text-muted">
               <summary className="cursor-pointer">Details</summary>
               <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2">
-                <dt>Registration order</dt>
-                <dd>{visit.registrationOrder}</dd>
                 <dt>Source</dt>
                 <dd>{visit.source}</dd>
                 <dt>Attributes source</dt>
                 <dd>{visit.attributesSource}</dd>
                 <dt>Enrichment</dt>
                 <dd>{visit.enrichmentStatus}</dd>
-                <dt>Accepted at</dt>
-                <dd>{formatTime(visit.assignment?.acceptedAt ?? null)}</dd>
                 <dt>Result recorded</dt>
-                <dd>{formatTime(visit.purchaseRecordedAt)}</dd>
+                <dd>{formatTime(visit.outcomeRecordedAt)}</dd>
               </dl>
             </details>
           </div>
@@ -122,9 +114,9 @@ export function VisitorsTable({
         key: 'demographics',
         header: 'Age / Gender',
         width: 'w-32',
-        cell: (visit) => (
+        cell: ({ visit }) => (
           <span className="text-ink">
-            {ageGroupLabels[visit.profile.ageGroup]} · {genderLabels[visit.profile.gender]}
+            {ageGroupLabels[visit.attributes.ageGroup]} · {genderLabels[visit.attributes.gender]}
           </span>
         ),
       },
@@ -132,7 +124,7 @@ export function VisitorsTable({
         key: 'times',
         header: 'Entry / Exit',
         width: 'w-32',
-        cell: (visit) => (
+        cell: ({ visit }) => (
           <span className="text-ink">
             {formatTime(visit.arrivedAt)} / {visit.departedAt === null ? '—' : formatTime(visit.departedAt)}
           </span>
@@ -142,15 +134,18 @@ export function VisitorsTable({
         key: 'associate',
         header: 'Associate',
         width: 'w-44',
-        cell: (visit) => {
-          if (visit.assignment !== null) {
-            return <span className="text-ink">{visit.assignment.participantName}</span>
+        cell: ({ visit, associateName }) => {
+          if (associateName !== null) {
+            return <span className="text-ink">{associateName}</span>
           }
           return (
             <div className="flex flex-col gap-0.5">
               <span className="text-muted">None</span>
-              {visit.serviceStatus === 'Waiting' && waitingExplanation !== null ? (
-                <span className="text-label text-muted">{waitingExplanation}</span>
+              {visit.status === 'Waiting' && waitingExplanation !== null ? (
+                <span className="text-label text-muted">
+                  {waitingExplanation}
+                  {visit.waitingPosition !== null ? ` (position ${visit.waitingPosition})` : ''}
+                </span>
               ) : null}
             </div>
           )
@@ -160,17 +155,13 @@ export function VisitorsTable({
         key: 'service',
         header: 'Service',
         width: 'w-28',
-        cell: (visit) => (
-          <StatusBadge tone={serviceStatusTones[visit.serviceStatus]}>
-            {serviceStatusLabels[visit.serviceStatus]}
-          </StatusBadge>
-        ),
+        cell: ({ visit }) => <StatusBadge tone={visitStatusTones[visit.status]}>{visitStatusLabels[visit.status]}</StatusBadge>,
       },
       {
         key: 'presence',
         header: 'Presence',
         width: 'w-24',
-        cell: (visit) => {
+        cell: ({ visit }) => {
           const presence = presenceOf(visit)
           return <StatusBadge tone={presenceTones[presence]}>{presenceLabels[presence]}</StatusBadge>
         },
@@ -179,39 +170,35 @@ export function VisitorsTable({
         key: 'purchase',
         header: 'Purchase',
         width: 'w-32',
-        cell: (visit) => (
-          <StatusBadge tone={purchaseResultTone(visit.purchaseResult)}>
-            {purchaseResultLabel(visit.purchaseResult)}
-          </StatusBadge>
-        ),
+        cell: ({ visit }) => <StatusBadge tone={outcomeTone(visit.outcome)}>{outcomeLabel(visit.outcome)}</StatusBadge>,
       },
       {
         key: 'actions',
         header: 'Actions',
         headerHidden: true,
         width: 'w-72',
-        cell: (visit) => (
+        cell: (row) => (
           <div className="flex flex-wrap items-center gap-2">
-            {canAcceptUp(visit) ? (
+            {canAcceptUp(row.visit) ? (
               <Button
                 size="sm"
                 variant="primary"
                 disabled={mutationsBlocked}
-                pending={isPending(actionKeys.accept(visit.visitId))}
-                onClick={() => onAccept(visit)}
+                pending={isPending(actionKeys.accept(row.visit.visitId))}
+                onClick={() => onAccept(row)}
               >
                 Accept UP
               </Button>
             ) : null}
 
-            {canRecordOutcome(visit) ? (
+            {canRecordOutcome(row.visit) ? (
               <>
                 <Button
                   size="sm"
                   variant="primary"
                   disabled={mutationsBlocked}
-                  pending={isPending(actionKeys.outcome(visit.visitId))}
-                  onClick={() => onRecordOutcome(visit, 'Sale')}
+                  pending={isPending(actionKeys.outcome(row.visit.visitId))}
+                  onClick={() => onRecordOutcome(row, 'Sale')}
                 >
                   Sale
                 </Button>
@@ -219,21 +206,21 @@ export function VisitorsTable({
                   size="sm"
                   variant="secondary"
                   disabled={mutationsBlocked}
-                  pending={isPending(actionKeys.outcome(visit.visitId))}
-                  onClick={() => onRecordOutcome(visit, 'NoSale')}
+                  pending={isPending(actionKeys.outcome(row.visit.visitId))}
+                  onClick={() => onRecordOutcome(row, 'NoSale')}
                 >
                   No-Sale
                 </Button>
               </>
             ) : null}
 
-            {canMarkExit(visit) ? (
+            {canMarkExit(row.visit) ? (
               <Button
                 size="sm"
                 variant="secondary"
                 disabled={mutationsBlocked}
-                pending={isPending(actionKeys.exit(visit.visitId))}
-                onClick={() => onMarkExit(visit)}
+                pending={isPending(actionKeys.departure(row.visit.visitId))}
+                onClick={() => onMarkExit(row)}
               >
                 Mark Exit
               </Button>
@@ -243,8 +230,8 @@ export function VisitorsTable({
               size="sm"
               variant="text"
               disabled={mutationsBlocked}
-              pending={isPending(actionKeys.editProfile(visit.visitId))}
-              onClick={() => onEditProfile(visit)}
+              pending={isPending(actionKeys.editAttributes(row.visit.visitId))}
+              onClick={() => onEditAttributes(row)}
             >
               Edit
             </Button>
@@ -252,10 +239,10 @@ export function VisitorsTable({
         ),
       },
     ],
-    [isPending, mutationsBlocked, onAccept, onEditProfile, onMarkExit, onRecordOutcome, waitingExplanation],
+    [isPending, mutationsBlocked, onAccept, onEditAttributes, onMarkExit, onRecordOutcome, waitingExplanation],
   )
 
-  const filtered = rows.length !== visits.length
+  const filtered = filteredRows.length !== rows.length
 
   return (
     <section aria-labelledby="visitors-heading" className="panel flex flex-col">
@@ -297,16 +284,16 @@ export function VisitorsTable({
       <DataTable
         caption="Visitors in the current demo session"
         columns={columns}
-        rows={rows}
-        rowKey={(visit) => visit.visitId}
+        rows={filteredRows}
+        rowKey={(row) => row.visit.visitId}
         state={state}
         errorMessage={errorMessage}
         emptyMessage={
-          filtered || visits.length > 0
+          filtered || rows.length > 0
             ? 'No visitors match the current filters.'
             : 'No visitors registered yet. Use Add Visitor to register the first arrival.'
         }
-        rowClassName={(visit) => (visit.departedAt === null ? undefined : 'bg-page')}
+        rowClassName={(row) => (row.visit.departedAt === null ? undefined : 'bg-page')}
       />
     </section>
   )

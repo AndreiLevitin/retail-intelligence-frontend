@@ -30,8 +30,8 @@ export function formatTimeWithSeconds(iso: string | null): string {
   })
 }
 
-/** `rate` is 0..1. An empty run shows 0%. */
+/** `rate` is already a percentage (0..100, not rounded by the server). */
 export function formatPercent(rate: number): string {
   if (!Number.isFinite(rate)) return '0%'
-  return `${Math.round(rate * 100)}%`
+  return `${Math.round(rate)}%`
 }

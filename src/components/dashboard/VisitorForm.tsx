@@ -6,22 +6,31 @@ import { Notice } from '../ui/Notice.tsx'
 import { Select } from '../ui/Select.tsx'
 import { TextInput } from '../ui/TextInput.tsx'
 import { AGE_GROUP_OPTIONS, GENDER_OPTIONS } from '../../lib/labels.ts'
-import type { AgeGroup, Gender, VisitorProfileDto } from '../../lib/types.ts'
+import type { AgeGroup, Gender, VisitorAttributes } from '../../lib/types.ts'
 
 export type VisitorFormMode = 'create' | 'edit'
+
+/** Form-local shape: accessory is a plain string field, `null` only on the wire. */
+interface FormState {
+  upperDescription: string
+  lowerDescription: string
+  accessory: string
+  ageGroup: AgeGroup
+  gender: Gender
+}
 
 interface VisitorFormProps {
   mode: VisitorFormMode
   /** Prefilled values in edit mode. */
-  initial?: VisitorProfileDto
+  initial?: VisitorAttributes
   pending: boolean
   /** Rejected-command message, shown inside the dialog so input is kept. */
   errorMessage?: string
-  onSubmit: (profile: VisitorProfileDto) => void
+  onSubmit: (attributes: VisitorAttributes) => void
   onCancel: () => void
 }
 
-const EMPTY_PROFILE: VisitorProfileDto = {
+const EMPTY_FORM: FormState = {
   upperDescription: '',
   lowerDescription: '',
   accessory: '',
@@ -29,10 +38,26 @@ const EMPTY_PROFILE: VisitorProfileDto = {
   gender: 'Unknown',
 }
 
+function toFormState(attributes: VisitorAttributes): FormState {
+  return { ...attributes, accessory: attributes.accessoryDescription ?? '' }
+}
+
+/** Trims and normalizes an empty accessory to `null`, matching the contract. */
+function toAttributes(form: FormState): VisitorAttributes {
+  const accessory = form.accessory.trim()
+  return {
+    upperDescription: form.upperDescription,
+    lowerDescription: form.lowerDescription,
+    accessoryDescription: accessory === '' ? null : accessory,
+    ageGroup: form.ageGroup,
+    gender: form.gender,
+  }
+}
+
 /**
- * One form serves creation and profile correction through an explicit mode.
- * It exposes profile fields only: registration times, purchase result and
- * assignment are lifecycle state and are never editable inputs here.
+ * One form serves creation and attribute correction through an explicit
+ * mode. It exposes profile fields only: registration times, purchase result
+ * and assignment are lifecycle state and are never editable inputs here.
  *
  * Empty descriptions and Unknown demographics are valid submissions.
  *
@@ -40,16 +65,16 @@ const EMPTY_PROFILE: VisitorProfileDto = {
  * a 2s poll refresh can never overwrite what the receptionist typed.
  */
 export function VisitorForm({ mode, initial, pending, errorMessage, onSubmit, onCancel }: VisitorFormProps) {
-  const [profile, setProfile] = useState<VisitorProfileDto>(initial ?? EMPTY_PROFILE)
+  const [form, setForm] = useState<FormState>(initial === undefined ? EMPTY_FORM : toFormState(initial))
 
   const title = mode === 'create' ? 'Add Visitor' : 'Edit Attributes'
   const description =
     mode === 'create'
       ? 'Entry time and queue position are set by the server. Leave a description empty and pick Unknown when you cannot tell.'
-      : 'Corrects the visitor profile only. Registration times, purchase result and assignment are unchanged, and manual values stay authoritative.'
+      : 'Corrects the visitor attributes only. Registration times, purchase result and assignment are unchanged, and manual values stay authoritative.'
 
-  function update<K extends keyof VisitorProfileDto>(key: K, value: VisitorProfileDto[K]): void {
-    setProfile((current) => ({ ...current, [key]: value }))
+  function update<K extends keyof FormState>(key: K, value: FormState[K]): void {
+    setForm((current) => ({ ...current, [key]: value }))
   }
 
   return (
@@ -64,7 +89,7 @@ export function VisitorForm({ mode, initial, pending, errorMessage, onSubmit, on
           <Button variant="secondary" onClick={onCancel} disabled={pending}>
             Cancel
           </Button>
-          <Button variant="primary" pending={pending} onClick={() => onSubmit(profile)}>
+          <Button variant="primary" pending={pending} onClick={() => onSubmit(toAttributes(form))}>
             {mode === 'create' ? 'Submit' : 'Save changes'}
           </Button>
         </>
@@ -75,7 +100,7 @@ export function VisitorForm({ mode, initial, pending, errorMessage, onSubmit, on
       <FormField id="upper-description" label="Upper clothing" optional hint="For example: navy puffer jacket.">
         <TextInput
           id="upper-description"
-          value={profile.upperDescription}
+          value={form.upperDescription}
           disabled={pending}
           aria-describedby="upper-description-hint"
           onChange={(event) => update('upperDescription', event.target.value)}
@@ -85,7 +110,7 @@ export function VisitorForm({ mode, initial, pending, errorMessage, onSubmit, on
       <FormField id="lower-description" label="Lower clothing" optional hint="For example: grey jeans.">
         <TextInput
           id="lower-description"
-          value={profile.lowerDescription}
+          value={form.lowerDescription}
           disabled={pending}
           aria-describedby="lower-description-hint"
           onChange={(event) => update('lowerDescription', event.target.value)}
@@ -95,7 +120,7 @@ export function VisitorForm({ mode, initial, pending, errorMessage, onSubmit, on
       <FormField id="accessory" label="Accessory" optional>
         <TextInput
           id="accessory"
-          value={profile.accessory}
+          value={form.accessory}
           disabled={pending}
           onChange={(event) => update('accessory', event.target.value)}
         />
@@ -105,7 +130,7 @@ export function VisitorForm({ mode, initial, pending, errorMessage, onSubmit, on
         <FormField id="age-group" label="Age group">
           <Select<AgeGroup>
             id="age-group"
-            value={profile.ageGroup}
+            value={form.ageGroup}
             options={AGE_GROUP_OPTIONS}
             disabled={pending}
             onValueChange={(value) => update('ageGroup', value)}
@@ -115,7 +140,7 @@ export function VisitorForm({ mode, initial, pending, errorMessage, onSubmit, on
         <FormField id="gender" label="Gender">
           <Select<Gender>
             id="gender"
-            value={profile.gender}
+            value={form.gender}
             options={GENDER_OPTIONS}
             disabled={pending}
             onValueChange={(value) => update('gender', value)}

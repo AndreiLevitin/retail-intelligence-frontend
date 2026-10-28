@@ -1,9 +1,12 @@
 /**
  * Client-generated idempotency keys.
  *
- * `eventId` identifies an intentional visitor registration; `commandId`
- * identifies one intended mutation. A retry reuses the original id so the
- * server can reject the replay instead of applying it twice.
+ * Only two commands carry one, per the backend contract: `eventId` on
+ * arrival (so a resubmitted registration creates no second visit) and
+ * `commandId` on an availability change (so a delayed retry cannot flip it
+ * twice). Accept / outcome / departure / attributes have no client key -
+ * the backend's own current-state check makes a blind retry safe and
+ * reports it back as `replayed`/`duplicate`.
  */
 export function newId(prefix: string): string {
   const random =

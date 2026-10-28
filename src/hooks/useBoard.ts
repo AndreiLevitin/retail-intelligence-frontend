@@ -6,16 +6,16 @@
  * Rules implemented here:
  *  - poll GET /api/board every 2s with a single request in flight
  *  - refresh after every mutation instead of optimistic authoritative state
- *  - drop snapshots that are older than the newest action or reset
+ *  - drop snapshots that started before a newer mutation or reset
  *  - disable only the affected action while its command is pending
- *  - keep the original eventId / commandId for a retry
+ *  - keep the original eventId / commandId for a retry of arrival/availability
  *  - keep the last known board visible while offline, recover on success
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BoardError, toBoardError } from '../services/boardService.ts'
 import type { BoardService } from '../services/boardService.ts'
 import { newCommandId, newEventId } from '../lib/ids.ts'
-import type { BoardSnapshot, ParticipantState, PurchaseResult, VisitorProfileDto } from '../lib/types.ts'
+import type { AvailabilityState, BoardSnapshot, Outcome, VisitorAttributes } from '../lib/types.ts'
 
 export const POLL_INTERVAL_MS = 2000
 const READ_TIMEOUT_MS = 8000
@@ -26,29 +26,26 @@ export type ConnectionState = 'connecting' | 'connected' | 'updating' | 'offline
 export const actionKeys = {
   addVisitor: 'add-visitor',
   reset: 'reset-demo',
-  editProfile: (visitId: string) => `visit:${visitId}:profile`,
+  editAttributes: (visitId: string) => `visit:${visitId}:attributes`,
   accept: (visitId: string) => `visit:${visitId}:accept`,
   outcome: (visitId: string) => `visit:${visitId}:outcome`,
-  exit: (visitId: string) => `visit:${visitId}:exit`,
+  departure: (visitId: string) => `visit:${visitId}:departure`,
   availability: (participantId: string) => `participant:${participantId}:availability`,
 } as const
 
 interface FailedCommand {
   key: string
-  /** Re-runs the identical command, original idempotency key included. */
+  /** Re-runs the identical command. */
   run: () => Promise<void>
 }
 
 export interface BoardActions {
-  addVisitor(profile: VisitorProfileDto): Promise<boolean>
-  editProfile(visitId: string, profile: VisitorProfileDto): Promise<boolean>
+  addVisitor(attributes: VisitorAttributes): Promise<boolean>
+  editAttributes(visitId: string, attributes: VisitorAttributes): Promise<boolean>
   acceptUp(visitId: string, assignmentId: string): Promise<boolean>
-  recordOutcome(visitId: string, result: PurchaseResult): Promise<boolean>
-  markExit(visitId: string, purchaseResult: PurchaseResult | null): Promise<boolean>
-  setAvailability(
-    participantId: string,
-    state: Extract<ParticipantState, 'Available' | 'OffFloor'>,
-  ): Promise<boolean>
+  recordOutcome(visitId: string, assignmentId: string, outcome: Outcome): Promise<boolean>
+  markDeparture(visitId: string, outcome: Outcome | null): Promise<boolean>
+  setAvailability(participantId: string, state: AvailabilityState): Promise<boolean>
   resetDemo(): Promise<boolean>
 }
 
@@ -60,7 +57,7 @@ export interface UseBoardResult extends BoardActions {
   /** Last rejected command. Rendered as a short notice with a retry path. */
   actionError: BoardError | null
   dismissActionError(): void
-  /** Retries the last failed command with its original idempotency key. */
+  /** Retries the last failed command exactly as it was sent. */
   retryFailedCommand(): Promise<boolean>
   canRetryFailedCommand: boolean
   isPending(key: string): boolean
@@ -79,18 +76,13 @@ export function useBoard(service: BoardService): UseBoardResult {
 
   const snapshotRef = useRef<BoardSnapshot | null>(null)
   const inFlight = useRef<AbortController | null>(null)
-  /** Bumped by every mutation and reset; older reads are discarded. */
+  /** Bumped by every mutation and reset; reads started before it are stale. */
   const generation = useRef(0)
   const failedCommand = useRef<FailedCommand | null>(null)
   const [canRetry, setCanRetry] = useState(false)
   const mounted = useRef(true)
 
   const applySnapshot = useCallback((next: BoardSnapshot) => {
-    const current = snapshotRef.current
-    // Within one session, never let an older revision overwrite a newer one.
-    if (current !== null && current.session.sessionId === next.session.sessionId && next.revision < current.revision) {
-      return
-    }
     snapshotRef.current = next
     setSnapshot(next)
   }, [])
@@ -188,58 +180,50 @@ export function useBoard(service: BoardService): UseBoardResult {
     [read],
   )
 
-  const requireSessionId = useCallback((): string | null => snapshotRef.current?.session.sessionId ?? null, [])
+  const currentSessionId = useCallback((): string | null => snapshotRef.current?.session.sessionId ?? null, [])
 
   const actions = useMemo<BoardActions>(() => {
     /** Mutations are blocked while a reset is in flight or before first load. */
     const guard = (): string | null => {
       if (isResetting) return null
-      return requireSessionId()
+      return currentSessionId()
     }
 
     return {
-      async addVisitor(profile) {
+      async addVisitor(attributes) {
         const sessionId = guard()
         if (sessionId === null) return false
         const eventId = newEventId()
-        return runCommand(actionKeys.addVisitor, () =>
-          service.registerVisitor({ eventId, sessionId, profile }),
-        )
+        return runCommand(actionKeys.addVisitor, () => service.registerVisitor({ eventId, sessionId, attributes }))
       },
 
-      async editProfile(visitId, profile) {
+      async editAttributes(visitId, attributes) {
         const sessionId = guard()
         if (sessionId === null) return false
-        const commandId = newCommandId()
-        return runCommand(actionKeys.editProfile(visitId), () =>
-          service.updateVisitorProfile({ commandId, sessionId, visitId, profile }),
+        return runCommand(actionKeys.editAttributes(visitId), () =>
+          service.updateAttributes({ sessionId, visitId, attributes }),
         )
       },
 
       async acceptUp(visitId, assignmentId) {
         const sessionId = guard()
         if (sessionId === null) return false
-        const commandId = newCommandId()
-        return runCommand(actionKeys.accept(visitId), () =>
-          service.acceptAssignment({ commandId, sessionId, assignmentId }),
-        )
+        return runCommand(actionKeys.accept(visitId), () => service.acceptAssignment({ sessionId, assignmentId }))
       },
 
-      async recordOutcome(visitId, result) {
+      async recordOutcome(visitId, assignmentId, outcome) {
         const sessionId = guard()
         if (sessionId === null) return false
-        const commandId = newCommandId()
         return runCommand(actionKeys.outcome(visitId), () =>
-          service.recordOutcome({ commandId, sessionId, visitId, result }),
+          service.recordOutcome({ sessionId, assignmentId, outcome }),
         )
       },
 
-      async markExit(visitId, purchaseResult) {
+      async markDeparture(visitId, outcome) {
         const sessionId = guard()
         if (sessionId === null) return false
-        const commandId = newCommandId()
-        return runCommand(actionKeys.exit(visitId), () =>
-          service.markExit({ commandId, sessionId, visitId, purchaseResult }),
+        return runCommand(actionKeys.departure(visitId), () =>
+          service.markDeparture({ sessionId, visitId, outcome }),
         )
       },
 
@@ -248,13 +232,14 @@ export function useBoard(service: BoardService): UseBoardResult {
         if (sessionId === null) return false
         const commandId = newCommandId()
         return runCommand(actionKeys.availability(participantId), () =>
-          service.setAvailability({ commandId, sessionId, participantId, state }),
+          service.setAvailability({ sessionId, participantId, commandId, state }),
         )
       },
 
       async resetDemo() {
         if (isResetting) return false
-        const commandId = newCommandId()
+        const sessionId = currentSessionId()
+        if (sessionId === null) return false
         setIsResetting(true)
         setActionError(null)
         generation.current += 1
@@ -262,7 +247,7 @@ export function useBoard(service: BoardService): UseBoardResult {
         inFlight.current = null
 
         try {
-          await service.resetDemo({ commandId })
+          await service.resetDemo({ sessionId })
           if (!mounted.current) return true
           // Old snapshots are discarded; the new board loads from zero.
           snapshotRef.current = null
@@ -276,7 +261,7 @@ export function useBoard(service: BoardService): UseBoardResult {
           const error = toBoardError(cause)
           setActionError(error)
           // Uncertain response: resolve it by fetching the current session.
-          failedCommand.current = { key: actionKeys.reset, run: () => service.resetDemo({ commandId }) }
+          failedCommand.current = { key: actionKeys.reset, run: () => service.resetDemo({ sessionId }) }
           setCanRetry(true)
           return false
         } finally {
@@ -287,7 +272,7 @@ export function useBoard(service: BoardService): UseBoardResult {
         }
       },
     }
-  }, [isResetting, read, requireSessionId, runCommand, service])
+  }, [currentSessionId, isResetting, read, runCommand, service])
 
   const retryFailedCommand = useCallback(async (): Promise<boolean> => {
     const failed = failedCommand.current

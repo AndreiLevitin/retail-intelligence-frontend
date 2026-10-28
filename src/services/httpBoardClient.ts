@@ -5,37 +5,52 @@
  * The operator token is held in memory for the tab's lifetime only; it is not
  * an account system and is never written to storage.
  *
- * The route shapes below are the frontend's assumption about the Vercel API.
- * See README "Remaining API integration work" before wiring the real backend.
+ * Routes, bodies and error codes mirror the backend's canonical contract
+ * at `retail-intelligence-backend/src/contracts/{dto,errors}.ts`.
  */
 import { BoardError } from './boardService.ts'
 import type {
   AcceptAssignmentCommand,
+  ApiErrorCode,
   BoardService,
-  MarkExitCommand,
+  MarkDepartureCommand,
   RecordOutcomeCommand,
   RegisterVisitorCommand,
   ResetDemoCommand,
   SetAvailabilityCommand,
-  UpdateProfileCommand,
+  UpdateAttributesCommand,
 } from './boardService.ts'
 import type { BoardSnapshot } from '../lib/types.ts'
 
 export const BOARD_ROUTES = {
   board: '/api/board',
-  visits: '/api/visits',
-  profile: (visitId: string) => `/api/visits/${encodeURIComponent(visitId)}/profile`,
+  arrivals: '/api/arrivals',
+  attributes: (visitId: string) => `/api/visits/${encodeURIComponent(visitId)}/attributes`,
   accept: (assignmentId: string) => `/api/assignments/${encodeURIComponent(assignmentId)}/accept`,
-  outcome: (visitId: string) => `/api/visits/${encodeURIComponent(visitId)}/outcome`,
-  exit: (visitId: string) => `/api/visits/${encodeURIComponent(visitId)}/exit`,
-  availability: (participantId: string) => `/api/participants/${encodeURIComponent(participantId)}/availability`,
+  outcome: (assignmentId: string) => `/api/assignments/${encodeURIComponent(assignmentId)}/outcome`,
+  departure: (visitId: string) => `/api/visits/${encodeURIComponent(visitId)}/departure`,
+  availability: '/api/availability',
   reset: '/api/demo/reset',
 } as const
 
 interface ApiErrorBody {
-  message?: string
   code?: string
+  message?: string
 }
+
+const KNOWN_API_CODES: readonly ApiErrorCode[] = [
+  'VALIDATION_ERROR',
+  'OUTCOME_REQUIRED',
+  'UNAUTHORIZED',
+  'NOT_FOUND',
+  'METHOD_NOT_ALLOWED',
+  'STALE_SESSION',
+  'INVALID_TRANSITION',
+  'REPLAY_CONFLICT',
+  'OUTCOME_CONFLICT',
+  'INTERNAL_ERROR',
+  'DATABASE_UNAVAILABLE',
+]
 
 export class HttpBoardClient implements BoardService {
   readonly mode = 'http' as const
@@ -55,39 +70,56 @@ export class HttpBoardClient implements BoardService {
   }
 
   async registerVisitor(command: RegisterVisitorCommand): Promise<void> {
-    await this.request('POST', BOARD_ROUTES.visits, command)
+    await this.request('POST', BOARD_ROUTES.arrivals, {
+      sessionId: command.sessionId,
+      eventId: command.eventId,
+      source: 'Manual',
+      detectedAt: null,
+      attributes: command.attributes,
+    })
   }
 
-  async updateVisitorProfile(command: UpdateProfileCommand): Promise<void> {
-    await this.request('PATCH', BOARD_ROUTES.profile(command.visitId), command)
+  async updateAttributes(command: UpdateAttributesCommand): Promise<void> {
+    await this.request('PATCH', BOARD_ROUTES.attributes(command.visitId), {
+      sessionId: command.sessionId,
+      source: 'Manual',
+      attributes: command.attributes,
+      enrichmentStatus: 'NotRequested',
+    })
   }
 
   async acceptAssignment(command: AcceptAssignmentCommand): Promise<void> {
-    await this.request('POST', BOARD_ROUTES.accept(command.assignmentId), command)
+    await this.request('POST', BOARD_ROUTES.accept(command.assignmentId), { sessionId: command.sessionId })
   }
 
   async recordOutcome(command: RecordOutcomeCommand): Promise<void> {
-    await this.request('POST', BOARD_ROUTES.outcome(command.visitId), command)
+    await this.request('POST', BOARD_ROUTES.outcome(command.assignmentId), {
+      sessionId: command.sessionId,
+      outcome: command.outcome,
+    })
   }
 
-  async markExit(command: MarkExitCommand): Promise<void> {
-    await this.request('POST', BOARD_ROUTES.exit(command.visitId), command)
+  async markDeparture(command: MarkDepartureCommand): Promise<void> {
+    await this.request('POST', BOARD_ROUTES.departure(command.visitId), {
+      sessionId: command.sessionId,
+      outcome: command.outcome,
+    })
   }
 
   async setAvailability(command: SetAvailabilityCommand): Promise<void> {
-    await this.request('POST', BOARD_ROUTES.availability(command.participantId), command)
+    await this.request('POST', BOARD_ROUTES.availability, {
+      sessionId: command.sessionId,
+      participantId: command.participantId,
+      commandId: command.commandId,
+      state: command.state,
+    })
   }
 
   async resetDemo(command: ResetDemoCommand): Promise<void> {
-    await this.request('POST', BOARD_ROUTES.reset, command)
+    await this.request('POST', BOARD_ROUTES.reset, { sessionId: command.sessionId })
   }
 
-  private async request<T>(
-    method: string,
-    path: string,
-    body?: unknown,
-    signal?: AbortSignal,
-  ): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     let response: Response
     try {
       response = await fetch(path, {
@@ -115,7 +147,7 @@ export class HttpBoardClient implements BoardService {
   }
 }
 
-/** Maps an HTTP failure to a short operator message - never SQL or stack text. */
+/** Maps the backend's {code, message} body to a short operator-facing error. */
 async function toBoardError(response: Response): Promise<BoardError> {
   let body: ApiErrorBody = {}
   try {
@@ -123,27 +155,21 @@ async function toBoardError(response: Response): Promise<BoardError> {
   } catch {
     body = {}
   }
-  const detail = typeof body.message === 'string' && body.message.length > 0 && body.message.length <= 160
-    ? body.message
-    : null
 
+  const message =
+    typeof body.message === 'string' && body.message.length > 0 && body.message.length <= 160
+      ? body.message
+      : 'The board service rejected that request.'
+
+  const apiCode = KNOWN_API_CODES.find((candidate) => candidate === body.code)
+  if (apiCode !== undefined) return BoardError.fromApi(apiCode, message, response.status)
+
+  // An unrecognised code or a non-JSON body: fall back to the HTTP status.
   if (response.status === 401 || response.status === 403) {
-    return new BoardError('Unauthorized', detail ?? 'Operator token was rejected.', {
-      retryable: false,
-      status: response.status,
-    })
-  }
-  if (response.status === 409 || response.status === 422 || response.status === 400) {
-    return new BoardError('Conflict', detail ?? 'The board rejected that action. Reloading current state.', {
-      retryable: false,
-      status: response.status,
-    })
+    return new BoardError('Unauthorized', message, { retryable: false, status: response.status })
   }
   if (response.status >= 500) {
-    return new BoardError('Server', detail ?? 'The board service failed. Try again.', {
-      retryable: true,
-      status: response.status,
-    })
+    return new BoardError('Server', message, { retryable: true, status: response.status })
   }
-  return new BoardError('Unknown', detail ?? 'Request failed.', { status: response.status })
+  return new BoardError('Unknown', message, { status: response.status })
 }

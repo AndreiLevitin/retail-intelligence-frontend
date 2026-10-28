@@ -13,7 +13,9 @@ import { Notice } from '../ui/Notice.tsx'
 import type { TableState } from '../ui/DataTable.tsx'
 import { actionKeys, useBoard } from '../../hooks/useBoard.ts'
 import { formatTimeWithSeconds } from '../../lib/format.ts'
-import type { ParticipantDto, PurchaseResult, VisitDto, VisitorProfileDto } from '../../lib/types.ts'
+import { buildVisitRows } from '../../lib/selectors.ts'
+import type { VisitRow } from '../../lib/selectors.ts'
+import type { AssociateView, AvailabilityState, Outcome, VisitorAttributes } from '../../lib/types.ts'
 import { boardService, boardServiceMode, mockController } from '../../services/index.ts'
 import type { ScenarioId } from '../../services/mockScenarios.ts'
 
@@ -23,7 +25,7 @@ interface DialogState {
   /** The visit the dialog acts on; its live row is read from the snapshot. */
   visitId?: string
   /** Captured once on open, so a 2s poll cannot overwrite typed input. */
-  initialProfile?: VisitorProfileDto
+  initialAttributes?: VisitorAttributes
 }
 
 const CLOSED: DialogState = { kind: 'none' }
@@ -43,36 +45,39 @@ export function DashboardPage() {
   const tableState: TableState =
     snapshot !== null ? 'ready' : board.loadError !== null ? 'error' : 'loading'
 
+  /** The visit/assignment/associate join lives in one selector, not in rows. */
+  const visitRows = useMemo<VisitRow[]>(() => (snapshot === null ? [] : buildVisitRows(snapshot)), [snapshot])
+
   /** Explains a Waiting visit with no assignment, from the current roster. */
   const waitingExplanation = useMemo(
-    () => explainWaiting(snapshot?.participants ?? []),
-    [snapshot?.participants],
+    () => explainWaiting(snapshot?.associates ?? []),
+    [snapshot?.associates],
   )
 
   /** Always the live row, so an open dialog follows server state. */
-  const activeVisit = useMemo<VisitDto | null>(() => {
-    if (dialog.visitId === undefined || snapshot === null) return null
-    return snapshot.visits.find((visit) => visit.visitId === dialog.visitId) ?? null
-  }, [dialog.visitId, snapshot])
+  const activeRow = useMemo<VisitRow | null>(() => {
+    if (dialog.visitId === undefined) return null
+    return visitRows.find((row) => row.visit.visitId === dialog.visitId) ?? null
+  }, [dialog.visitId, visitRows])
 
   const close = useCallback(() => setDialog(CLOSED), [])
 
-  const submitProfile = useCallback(
-    async (profile: VisitorProfileDto) => {
+  const submitAttributes = useCallback(
+    async (attributes: VisitorAttributes) => {
       const current = dialog
       const ok =
         current.kind === 'visitor-form' && current.mode === 'edit' && current.visitId !== undefined
-          ? await board.editProfile(current.visitId, profile)
-          : await board.addVisitor(profile)
+          ? await board.editAttributes(current.visitId, attributes)
+          : await board.addVisitor(attributes)
       if (ok) setDialog(CLOSED)
     },
     [board, dialog],
   )
 
   const commitExit = useCallback(
-    async (purchaseResult: PurchaseResult | null) => {
+    async (outcome: Outcome | null) => {
       if (dialog.kind !== 'exit' || dialog.visitId === undefined) return
-      const ok = await board.markExit(dialog.visitId, purchaseResult)
+      const ok = await board.markDeparture(dialog.visitId, outcome)
       if (ok) setDialog(CLOSED)
     },
     [board, dialog],
@@ -150,35 +155,40 @@ export function DashboardPage() {
       <ShiftSummary metrics={snapshot?.metrics ?? null} />
 
       <VisitorsTable
-        visits={snapshot?.visits ?? []}
+        rows={visitRows}
         state={tableState}
         errorMessage={board.loadError?.message}
         mutationsBlocked={mutationsBlocked}
         isPending={board.isPending}
         waitingExplanation={waitingExplanation}
-        onAccept={(visit) => {
-          if (visit.assignment === null) return
-          void board.acceptUp(visit.visitId, visit.assignment.assignmentId)
+        onAccept={(row) => {
+          if (row.visit.assignmentId === null) return
+          void board.acceptUp(row.visit.visitId, row.visit.assignmentId)
         }}
-        onRecordOutcome={(visit, result) => void board.recordOutcome(visit.visitId, result)}
-        onMarkExit={(visit) => setDialog({ kind: 'exit', visitId: visit.visitId })}
-        onEditProfile={(visit) =>
+        onRecordOutcome={(row, outcome) => {
+          if (row.visit.assignmentId === null) return
+          void board.recordOutcome(row.visit.visitId, row.visit.assignmentId, outcome)
+        }}
+        onMarkExit={(row) => setDialog({ kind: 'exit', visitId: row.visit.visitId })}
+        onEditAttributes={(row) =>
           setDialog({
             kind: 'visitor-form',
             mode: 'edit',
-            visitId: visit.visitId,
-            initialProfile: visit.profile,
+            visitId: row.visit.visitId,
+            initialAttributes: row.visit.attributes,
           })
         }
       />
 
       <AssociatesTable
-        participants={snapshot?.participants ?? []}
+        associates={snapshot?.associates ?? []}
         state={tableState}
         errorMessage={board.loadError?.message}
         mutationsBlocked={mutationsBlocked}
         isPending={board.isPending}
-        onSetAvailability={(participant, next) => void board.setAvailability(participant.participantId, next)}
+        onSetAvailability={(associate, next: AvailabilityState) =>
+          void board.setAvailability(associate.participantId, next)
+        }
       />
 
       <ActivityLog entries={snapshot?.activity ?? []} />
@@ -187,24 +197,25 @@ export function DashboardPage() {
       {dialog.kind === 'visitor-form' ? (
         <VisitorForm
           mode={dialog.mode ?? 'create'}
-          initial={dialog.initialProfile}
+          initial={dialog.initialAttributes}
           pending={
             dialog.visitId === undefined
               ? board.isPending(actionKeys.addVisitor)
-              : board.isPending(actionKeys.editProfile(dialog.visitId))
+              : board.isPending(actionKeys.editAttributes(dialog.visitId))
           }
           errorMessage={dialogError}
-          onSubmit={(profile) => void submitProfile(profile)}
+          onSubmit={(attributes) => void submitAttributes(attributes)}
           onCancel={close}
         />
       ) : null}
 
-      {dialog.kind === 'exit' && activeVisit !== null ? (
+      {dialog.kind === 'exit' && activeRow !== null ? (
         <ExitDialog
-          visit={activeVisit}
-          pending={board.isPending(actionKeys.exit(activeVisit.visitId))}
+          visit={activeRow.visit}
+          associateName={activeRow.associateName}
+          pending={board.isPending(actionKeys.departure(activeRow.visit.visitId))}
           errorMessage={dialogError}
-          onCommit={(result) => void commitExit(result)}
+          onCommit={(outcome) => void commitExit(outcome)}
           onCancel={close}
         />
       ) : null}
@@ -226,13 +237,13 @@ export function DashboardPage() {
  * Waiting visits exist only when no participant is eligible. This states the
  * reason so the board never looks simply broken.
  */
-function explainWaiting(participants: readonly ParticipantDto[]): string | null {
-  if (participants.length === 0) return null
-  const offFloor = participants.filter((p) => p.state === 'OffFloor').length
-  const busy = participants.filter((p) => p.state === 'PendingAcceptance' || p.state === 'OnUP').length
+function explainWaiting(associates: readonly AssociateView[]): string | null {
+  if (associates.length === 0) return null
+  const offFloor = associates.filter((p) => p.state === 'OffFloor').length
+  const busy = associates.filter((p) => p.state === 'PendingAcceptance' || p.state === 'OnUP').length
 
-  if (offFloor === participants.length) return 'All associates are Off Floor.'
-  if (busy === participants.length) return 'All associates are busy with a turn.'
-  if (offFloor + busy === participants.length) return 'No eligible associate: the rest are busy or Off Floor.'
+  if (offFloor === associates.length) return 'All associates are Off Floor.'
+  if (busy === associates.length) return 'All associates are busy with a turn.'
+  if (offFloor + busy === associates.length) return 'No eligible associate: the rest are busy or Off Floor.'
   return null
 }

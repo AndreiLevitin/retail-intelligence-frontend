@@ -3,26 +3,32 @@
  *
  * It follows the same transitions the real backend owns - FIFO registration,
  * one unfinished assignment per participant, bottom-of-rotation release,
- * waiting dispatch on returning capacity, idempotent commands. The rules live
- * here and not in components, so they exist in exactly one place and can be
- * deleted together with the mock adapter.
+ * waiting dispatch on returning capacity, state-checked idempotency, rejected
+ * conflicts. The rules live here and not in components, so they exist in
+ * exactly one place and can be deleted together with the mock adapter.
+ *
+ * Only arrival (`eventId`) and availability (`commandId`) carry a client
+ * idempotency key, matching the backend contract; accept, outcome, departure
+ * and attributes are made safe to retry by checking current state instead.
  *
  * Every mutation takes an explicit `at` timestamp, which keeps the seeded
  * review scenarios deterministic.
  */
 import { BoardError } from './boardService.ts'
 import type {
-  ActivityEntryDto,
   ActivityKind,
-  AssignmentCompletionReason,
+  ActivityView,
+  AssignmentPhase,
+  AssignmentView,
+  AssociateView,
   BoardSnapshot,
-  MetricsDto,
-  ParticipantDto,
+  CompletionReason,
+  MetricsView,
+  Outcome,
   ParticipantState,
-  PurchaseResult,
-  ServiceStatus,
-  VisitDto,
-  VisitorProfileDto,
+  VisitorAttributes,
+  VisitStatus,
+  VisitView,
 } from '../lib/types.ts'
 
 /** Predefined roster. Survives Reset Demo; only the demo session is cleared. */
@@ -38,8 +44,8 @@ interface MockParticipant {
   displayName: string
   state: ParticipantState
   queuePosition: number | null
-  assignedCount: number
-  acceptedCount: number
+  assignedTurns: number
+  acceptedTurns: number
   currentAssignmentId: string | null
 }
 
@@ -50,18 +56,19 @@ interface MockAssignment {
   assignedAt: string
   acceptedAt: string | null
   completedAt: string | null
-  completionReason: AssignmentCompletionReason | null
+  completionReason: CompletionReason | null
 }
 
 interface MockVisit {
   visitId: string
+  /** Internal FIFO rank; the DTO exposes order only as array position. */
   registrationOrder: number
-  profile: VisitorProfileDto
+  attributes: VisitorAttributes
   arrivedAt: string
   departedAt: string | null
-  serviceStatus: ServiceStatus
-  purchaseResult: PurchaseResult | null
-  purchaseRecordedAt: string | null
+  status: VisitStatus
+  outcome: Outcome | null
+  outcomeRecordedAt: string | null
 }
 
 export interface MockState {
@@ -71,11 +78,11 @@ export interface MockState {
   visits: MockVisit[]
   assignments: MockAssignment[]
   /** Append order; the snapshot exposes it newest first. */
-  activity: ActivityEntryDto[]
-  revision: number
-  /** Idempotency ledgers for replayed registrations and commands. */
-  seenEventIds: Set<string>
-  seenCommandIds: Set<string>
+  activity: ActivityView[]
+  /** Dedupe ledger for resubmitted arrivals: eventId -> the visit it created. */
+  eventIdToVisitId: Map<string, string>
+  /** Dedupe ledger for replayed availability commands. */
+  seenAvailabilityCommandIds: Set<string>
   nextQueuePosition: number
   counters: Record<string, number>
 }
@@ -90,15 +97,17 @@ function logAt(
   state: MockState,
   at: string,
   kind: ActivityKind,
-  message: string,
-  refs?: { visitId?: string; participantId?: string },
+  description: string,
+  refs?: { visitId?: string; participantId?: string; assignmentId?: string },
 ): void {
   state.activity.push({
-    entryId: nextId(state, 'act'),
+    activityId: nextId(state, 'act'),
     occurredAt: at,
     kind,
-    message,
-    ...refs,
+    description,
+    visitId: refs?.visitId ?? null,
+    participantId: refs?.participantId ?? null,
+    assignmentId: refs?.assignmentId ?? null,
   })
 }
 
@@ -111,10 +120,11 @@ export function createSession(sessionId: string, startedAt: string): MockState {
     participants: [],
     visits: [],
     assignments: [],
+    // No activity entry for session start/reset: the backend's activity kinds
+    // only cover board events, and a fresh session starts with an empty log.
     activity: [],
-    revision: 1,
-    seenEventIds: new Set(),
-    seenCommandIds: new Set(),
+    eventIdToVisitId: new Map(),
+    seenAvailabilityCommandIds: new Set(),
     nextQueuePosition: 1,
     counters: {},
   }
@@ -127,13 +137,12 @@ export function createSession(sessionId: string, startedAt: string): MockState {
       displayName: associate.displayName,
       state: 'Available',
       queuePosition: state.nextQueuePosition++,
-      assignedCount: 0,
-      acceptedCount: 0,
+      assignedTurns: 0,
+      acceptedTurns: 0,
       currentAssignmentId: null,
     })
   }
 
-  logAt(state, startedAt, 'SessionStarted', 'Demo session started with the initial roster Available.')
   return state
 }
 
@@ -143,6 +152,7 @@ function requireSession(state: MockState, sessionId: string): void {
   if (sessionId !== state.sessionId) {
     throw new BoardError('Conflict', 'This demo session was reset. The board was reloaded.', {
       retryable: false,
+      apiCode: 'STALE_SESSION',
     })
   }
 }
@@ -150,7 +160,10 @@ function requireSession(state: MockState, sessionId: string): void {
 function findVisit(state: MockState, visitId: string): MockVisit {
   const visit = state.visits.find((candidate) => candidate.visitId === visitId)
   if (visit === undefined) {
-    throw new BoardError('Conflict', 'That visitor is no longer on the board.', { retryable: false })
+    throw new BoardError('Conflict', 'That visitor is no longer on the board.', {
+      retryable: false,
+      apiCode: 'NOT_FOUND',
+    })
   }
   return visit
 }
@@ -158,9 +171,20 @@ function findVisit(state: MockState, visitId: string): MockVisit {
 function findParticipant(state: MockState, participantId: string): MockParticipant {
   const participant = state.participants.find((candidate) => candidate.participantId === participantId)
   if (participant === undefined) {
-    throw new BoardError('Conflict', 'That associate is no longer on the board.', { retryable: false })
+    throw new BoardError('Conflict', 'That associate is no longer on the board.', {
+      retryable: false,
+      apiCode: 'NOT_FOUND',
+    })
   }
   return participant
+}
+
+function findAssignment(state: MockState, assignmentId: string): MockAssignment {
+  const assignment = state.assignments.find((candidate) => candidate.assignmentId === assignmentId)
+  if (assignment === undefined) {
+    throw new BoardError('Conflict', 'That UP no longer exists.', { retryable: false, apiCode: 'NOT_FOUND' })
+  }
+  return assignment
 }
 
 /** The unfinished assignment of a visit, if there is one. */
@@ -168,9 +192,9 @@ function openAssignmentOfVisit(state: MockState, visitId: string): MockAssignmen
   return state.assignments.find((a) => a.visitId === visitId && a.completedAt === null)
 }
 
-/** Last assignment of a visit, open or closed - what the visitor row shows. */
+/** Open assignment if any, else the last closed one - what a visit row shows. */
 function latestAssignmentOfVisit(state: MockState, visitId: string): MockAssignment | undefined {
-  return [...state.assignments].reverse().find((a) => a.visitId === visitId)
+  return openAssignmentOfVisit(state, visitId) ?? [...state.assignments].reverse().find((a) => a.visitId === visitId)
 }
 
 function eligibleParticipants(state: MockState): MockParticipant[] {
@@ -205,13 +229,14 @@ function reserveFor(state: MockState, visit: MockVisit, at: string): boolean {
   participant.state = 'PendingAcceptance'
   participant.queuePosition = null
   participant.currentAssignmentId = assignment.assignmentId
-  participant.assignedCount += 1
+  participant.assignedTurns += 1
 
-  visit.serviceStatus = 'Assigned'
+  visit.status = 'Assigned'
 
   logAt(state, at, 'AssignmentCreated', `UP assigned to ${participant.displayName}.`, {
     visitId: visit.visitId,
     participantId: participant.participantId,
+    assignmentId: assignment.assignmentId,
   })
   return true
 }
@@ -222,7 +247,7 @@ function reserveFor(state: MockState, visit: MockVisit, at: string): boolean {
  */
 function dispatchWaiting(state: MockState, at: string): void {
   const waiting = state.visits
-    .filter((visit) => visit.serviceStatus === 'Waiting' && visit.departedAt === null)
+    .filter((visit) => visit.status === 'Waiting' && visit.departedAt === null)
     .sort((a, b) => a.registrationOrder - b.registrationOrder)
 
   for (const visit of waiting) {
@@ -231,12 +256,7 @@ function dispatchWaiting(state: MockState, at: string): void {
 }
 
 /** Closes the open assignment of a visit and releases the participant once. */
-function closeOpenAssignment(
-  state: MockState,
-  visitId: string,
-  reason: AssignmentCompletionReason,
-  at: string,
-): void {
+function closeOpenAssignment(state: MockState, visitId: string, reason: CompletionReason, at: string): void {
   const assignment = openAssignmentOfVisit(state, visitId)
   if (assignment === undefined) return
 
@@ -251,205 +271,205 @@ function closeOpenAssignment(
 
 /* -------------------------------------------------------------- commands */
 
+export interface RegisterVisitorResult {
+  visitId: string
+  duplicate: boolean
+  status: VisitStatus
+}
+
 export function registerVisitor(
   state: MockState,
-  input: { eventId: string; sessionId: string; profile: VisitorProfileDto },
+  input: { eventId: string; sessionId: string; attributes: VisitorAttributes },
   at: string,
-): void {
+): RegisterVisitorResult {
   requireSession(state, input.sessionId)
-  // Resubmitting the same intentional registration must not duplicate a
-  // visit, an assignment or an activity entry.
-  if (state.seenEventIds.has(input.eventId)) return
-  state.seenEventIds.add(input.eventId)
+
+  const existingVisitId = state.eventIdToVisitId.get(input.eventId)
+  if (existingVisitId !== undefined) {
+    // A resubmitted intentional registration creates nothing extra.
+    const existing = findVisit(state, existingVisitId)
+    return { visitId: existing.visitId, duplicate: true, status: existing.status }
+  }
 
   const visit: MockVisit = {
     visitId: nextId(state, 'vis'),
     registrationOrder: state.visits.length + 1,
-    profile: { ...input.profile },
+    attributes: { ...input.attributes },
     arrivedAt: at,
     departedAt: null,
-    serviceStatus: 'Waiting',
-    purchaseResult: null,
-    purchaseRecordedAt: null,
+    status: 'Waiting',
+    outcome: null,
+    outcomeRecordedAt: null,
   }
   state.visits.push(visit)
-  logAt(state, at, 'VisitRegistered', 'Visitor registered manually.', { visitId: visit.visitId })
+  state.eventIdToVisitId.set(input.eventId, visit.visitId)
+  logAt(state, at, 'ArrivalRecorded', 'Visitor registered manually.', { visitId: visit.visitId })
 
   // Reserved immediately; the visit stays Waiting when nobody is eligible.
   reserveFor(state, visit, at)
-  state.revision += 1
+  return { visitId: visit.visitId, duplicate: false, status: visit.status }
 }
 
-export function updateVisitorProfile(
+export function updateAttributes(
   state: MockState,
-  input: { commandId: string; sessionId: string; visitId: string; profile: VisitorProfileDto },
+  input: { sessionId: string; visitId: string; attributes: VisitorAttributes },
   at: string,
 ): void {
   requireSession(state, input.sessionId)
-  if (state.seenCommandIds.has(input.commandId)) return
-  state.seenCommandIds.add(input.commandId)
-
   const visit = findVisit(state, input.visitId)
-  // Profile only: timestamps, outcome, assignment and queue stay untouched.
-  visit.profile = { ...input.profile }
-  logAt(state, at, 'ProfileUpdated', 'Visitor attributes corrected.', { visitId: visit.visitId })
-  state.revision += 1
+  // Attributes only: timestamps, outcome, assignment and queue stay untouched.
+  // A repeated identical PATCH is naturally idempotent - no ledger needed.
+  visit.attributes = { ...input.attributes }
+  logAt(state, at, 'VisitorAttributesUpdated', 'Visitor attributes corrected.', { visitId: visit.visitId })
 }
 
 export function acceptAssignment(
   state: MockState,
-  input: { commandId: string; sessionId: string; assignmentId: string },
+  input: { sessionId: string; assignmentId: string },
   at: string,
 ): void {
   requireSession(state, input.sessionId)
-  if (state.seenCommandIds.has(input.commandId)) return
-  state.seenCommandIds.add(input.commandId)
+  const assignment = findAssignment(state, input.assignmentId)
 
-  const assignment = state.assignments.find((a) => a.assignmentId === input.assignmentId)
-  if (assignment === undefined) {
-    throw new BoardError('Conflict', 'That UP is no longer available to accept.', { retryable: false })
-  }
-  // Repeated acceptance has no further effect.
+  // Already accepted: a blind retry reports replayed, no further effect.
   if (assignment.acceptedAt !== null) return
   if (assignment.completedAt !== null) {
-    throw new BoardError('Conflict', 'That turn is already closed.', { retryable: false })
+    throw new BoardError('Conflict', 'That turn is already closed.', {
+      retryable: false,
+      apiCode: 'INVALID_TRANSITION',
+    })
   }
 
   const visit = findVisit(state, assignment.visitId)
   if (visit.departedAt !== null) {
-    throw new BoardError('Conflict', 'That visitor has already left.', { retryable: false })
+    throw new BoardError('Conflict', 'That visitor has already left.', {
+      retryable: false,
+      apiCode: 'INVALID_TRANSITION',
+    })
   }
 
   assignment.acceptedAt = at
-  visit.serviceStatus = 'Accepted'
+  visit.status = 'Accepted'
 
   const participant = findParticipant(state, assignment.participantId)
-  // Still ineligible: OnUP is not an idle state.
   participant.state = 'OnUP'
-  participant.acceptedCount += 1
+  participant.acceptedTurns += 1
 
   logAt(state, at, 'AssignmentAccepted', `${participant.displayName} accepted the UP.`, {
     visitId: visit.visitId,
     participantId: participant.participantId,
+    assignmentId: assignment.assignmentId,
   })
-  state.revision += 1
 }
 
 export function recordOutcome(
   state: MockState,
-  input: { commandId: string; sessionId: string; visitId: string; result: PurchaseResult },
+  input: { sessionId: string; assignmentId: string; outcome: Outcome },
   at: string,
 ): void {
   requireSession(state, input.sessionId)
-  if (state.seenCommandIds.has(input.commandId)) return
-  state.seenCommandIds.add(input.commandId)
+  const assignment = findAssignment(state, input.assignmentId)
+  const visit = findVisit(state, assignment.visitId)
 
-  const visit = findVisit(state, input.visitId)
-
-  if (visit.purchaseResult !== null) {
+  if (visit.outcome !== null) {
     // The same outcome again is a no-op; a different one is a real conflict.
-    if (visit.purchaseResult === input.result) return
+    if (visit.outcome === input.outcome) return
     throw new BoardError('Conflict', 'A different purchase result is already recorded.', {
       retryable: false,
+      apiCode: 'OUTCOME_CONFLICT',
     })
   }
-
-  const assignment = openAssignmentOfVisit(state, input.visitId)
-  if (assignment === undefined || assignment.acceptedAt === null) {
+  if (assignment.acceptedAt === null || assignment.completedAt !== null) {
     throw new BoardError('Conflict', 'Only an accepted, unfinished turn can record an outcome.', {
       retryable: false,
+      apiCode: 'INVALID_TRANSITION',
     })
   }
 
-  visit.purchaseResult = input.result
-  visit.purchaseRecordedAt = at
-  // Service is complete; the visitor stays Inside until Mark Exit.
-  visit.serviceStatus = 'Completed'
+  visit.outcome = input.outcome
+  visit.outcomeRecordedAt = at
+  // The turn is complete, but the visitor stays Inside until Mark Exit.
+  visit.status = 'Completed'
 
   closeOpenAssignment(state, visit.visitId, 'OutcomeRecorded', at)
 
-  logAt(state, at, 'OutcomeRecorded', input.result === 'Sale' ? 'Sale recorded.' : 'No-Sale recorded.', {
+  logAt(state, at, 'TurnCompleted', input.outcome === 'Sale' ? 'Sale recorded.' : 'No-Sale recorded.', {
     visitId: visit.visitId,
     participantId: assignment.participantId,
+    assignmentId: assignment.assignmentId,
   })
 
   dispatchWaiting(state, at)
-  state.revision += 1
 }
 
-export function markExit(
+export function markDeparture(
   state: MockState,
-  input: { commandId: string; sessionId: string; visitId: string; purchaseResult: PurchaseResult | null },
+  input: { sessionId: string; visitId: string; outcome: Outcome | null },
   at: string,
 ): void {
   requireSession(state, input.sessionId)
-  if (state.seenCommandIds.has(input.commandId)) return
-  state.seenCommandIds.add(input.commandId)
-
   const visit = findVisit(state, input.visitId)
 
   if (visit.departedAt !== null) {
-    // A duplicate exit preserves the original time and result.
-    if (input.purchaseResult !== null && visit.purchaseResult !== input.purchaseResult) {
+    // A duplicate departure preserves the original time and result.
+    if (input.outcome !== null && visit.outcome !== input.outcome) {
       throw new BoardError('Conflict', 'A different purchase result is already recorded.', {
         retryable: false,
+        apiCode: 'OUTCOME_CONFLICT',
       })
     }
     return
   }
 
-  if (visit.purchaseResult === null) {
-    if (input.purchaseResult === null) {
+  if (visit.outcome === null) {
+    if (input.outcome === null) {
       throw new BoardError('Conflict', 'Select Sale or No-Sale before recording the exit.', {
         retryable: false,
+        apiCode: 'OUTCOME_REQUIRED',
       })
     }
-    visit.purchaseResult = input.purchaseResult
-    visit.purchaseRecordedAt = at
-  } else if (input.purchaseResult !== null && input.purchaseResult !== visit.purchaseResult) {
+    visit.outcome = input.outcome
+    visit.outcomeRecordedAt = at
+  } else if (input.outcome !== null && input.outcome !== visit.outcome) {
     throw new BoardError('Conflict', 'A different purchase result is already recorded.', {
       retryable: false,
+      apiCode: 'OUTCOME_CONFLICT',
     })
   }
 
-  const serviceWasComplete = visit.serviceStatus === 'Completed'
+  const wasAlreadyComplete = visit.status === 'Completed'
 
   visit.departedAt = at
-  visit.serviceStatus = 'Completed'
+  visit.status = 'Completed'
 
   // Already-completed service does not touch the participant or the queue,
   // even if that participant now serves another visitor.
-  if (!serviceWasComplete) {
+  if (!wasAlreadyComplete) {
     closeOpenAssignment(state, visit.visitId, 'Departure', at)
   }
 
-  logAt(state, at, 'VisitDeparted', 'Visitor exit recorded.', { visitId: visit.visitId })
+  logAt(state, at, 'VisitorDeparted', 'Visitor exit recorded.', { visitId: visit.visitId })
 
-  if (!serviceWasComplete) dispatchWaiting(state, at)
-  state.revision += 1
+  if (!wasAlreadyComplete) dispatchWaiting(state, at)
 }
 
 export function setAvailability(
   state: MockState,
-  input: {
-    commandId: string
-    sessionId: string
-    participantId: string
-    state: Extract<ParticipantState, 'Available' | 'OffFloor'>
-  },
+  input: { sessionId: string; participantId: string; commandId: string; state: 'Available' | 'OffFloor' },
   at: string,
 ): void {
   requireSession(state, input.sessionId)
   // A delayed replay of the original commandId must not append again or undo
   // a later change.
-  if (state.seenCommandIds.has(input.commandId)) return
-  state.seenCommandIds.add(input.commandId)
+  if (state.seenAvailabilityCommandIds.has(input.commandId)) return
+  state.seenAvailabilityCommandIds.add(input.commandId)
 
   const participant = findParticipant(state, input.participantId)
 
   if (participant.state === 'PendingAcceptance' || participant.state === 'OnUP') {
     throw new BoardError('Conflict', 'Only an idle associate can change availability.', {
       retryable: false,
+      apiCode: 'INVALID_TRANSITION',
     })
   }
   if (participant.state === input.state) return
@@ -470,78 +490,93 @@ export function setAvailability(
   )
 
   if (input.state === 'Available') dispatchWaiting(state, at)
-  state.revision += 1
 }
 
 /* -------------------------------------------------------------- snapshot */
 
-function metricsOf(state: MockState): MetricsDto {
+function metricsOf(state: MockState): MetricsView {
   // All current-run visits are the denominator; Sale visits the numerator.
   const visitors = state.visits.length
-  const closedSales = state.visits.filter((visit) => visit.purchaseResult === 'Sale').length
+  const closedSales = state.visits.filter((visit) => visit.outcome === 'Sale').length
   return {
     visitors,
     assignedTurns: state.assignments.length,
     acceptedTurns: state.assignments.filter((a) => a.acceptedAt !== null).length,
     closedSales,
-    conversionRate: visitors === 0 ? 0 : closedSales / visitors,
+    conversionRate: visitors === 0 ? 0 : (closedSales / visitors) * 100,
   }
 }
 
-function toVisitDto(state: MockState, visit: MockVisit): VisitDto {
+/** 1-based FIFO rank among Waiting, still-inside visitors; null otherwise. */
+function waitingPositionOf(state: MockState, visit: MockVisit): number | null {
+  if (visit.status !== 'Waiting' || visit.departedAt !== null) return null
+  const waitingOrder = state.visits
+    .filter((candidate) => candidate.status === 'Waiting' && candidate.departedAt === null)
+    .sort((a, b) => a.registrationOrder - b.registrationOrder)
+  return waitingOrder.findIndex((candidate) => candidate.visitId === visit.visitId) + 1
+}
+
+function toVisitView(state: MockState, visit: MockVisit): VisitView {
   const assignment = latestAssignmentOfVisit(state, visit.visitId)
   return {
     visitId: visit.visitId,
-    registrationOrder: visit.registrationOrder,
+    arrivedAt: visit.arrivedAt,
+    detectedAt: null,
+    departedAt: visit.departedAt,
     source: 'Manual',
+    status: visit.status,
+    attributes: { ...visit.attributes },
     attributesSource: 'Manual',
     enrichmentStatus: 'NotRequested',
-    profile: { ...visit.profile },
-    arrivedAt: visit.arrivedAt,
-    departedAt: visit.departedAt,
-    serviceStatus: visit.serviceStatus,
-    purchaseResult: visit.purchaseResult,
-    purchaseRecordedAt: visit.purchaseRecordedAt,
-    assignment:
-      assignment === undefined
-        ? null
-        : {
-            assignmentId: assignment.assignmentId,
-            participantId: assignment.participantId,
-            participantName: findParticipant(state, assignment.participantId).displayName,
-            assignedAt: assignment.assignedAt,
-            acceptedAt: assignment.acceptedAt,
-            completedAt: assignment.completedAt,
-            completionReason: assignment.completionReason,
-          },
+    outcome: visit.outcome,
+    outcomeRecordedAt: visit.outcomeRecordedAt,
+    waitingPosition: waitingPositionOf(state, visit),
+    assignmentId: assignment?.assignmentId ?? null,
   }
 }
 
-function toParticipantDto(state: MockState, participant: MockParticipant): ParticipantDto {
-  // Resolved here so associate rows never join tables themselves.
-  const open = state.assignments.find((a) => a.assignmentId === participant.currentAssignmentId)
+function phaseOf(assignment: MockAssignment): AssignmentPhase {
+  if (assignment.completedAt !== null) return 'Completed'
+  if (assignment.acceptedAt !== null) return 'Accepted'
+  return 'PendingAcceptance'
+}
+
+function toAssignmentView(assignment: MockAssignment): AssignmentView {
+  return {
+    assignmentId: assignment.assignmentId,
+    visitId: assignment.visitId,
+    participantId: assignment.participantId,
+    phase: phaseOf(assignment),
+    assignedAt: assignment.assignedAt,
+    acceptedAt: assignment.acceptedAt,
+    completedAt: assignment.completedAt,
+    completionReason: assignment.completionReason,
+  }
+}
+
+function toAssociateView(participant: MockParticipant): AssociateView {
   return {
     participantId: participant.participantId,
     associateId: participant.associateId,
     displayName: participant.displayName,
     state: participant.state,
     queuePosition: participant.queuePosition,
-    assignedCount: participant.assignedCount,
-    acceptedCount: participant.acceptedCount,
-    currentVisitId: open?.visitId ?? null,
+    currentAssignmentId: participant.currentAssignmentId,
+    assignedTurns: participant.assignedTurns,
+    acceptedTurns: participant.acceptedTurns,
   }
 }
 
 export function toSnapshot(state: MockState, serverTime: string): BoardSnapshot {
   return {
     session: { sessionId: state.sessionId, startedAt: state.startedAt },
-    participants: state.participants.map((participant) => toParticipantDto(state, participant)),
+    associates: state.participants.map(toAssociateView),
     visits: [...state.visits]
       .sort((a, b) => a.registrationOrder - b.registrationOrder)
-      .map((visit) => toVisitDto(state, visit)),
+      .map((visit) => toVisitView(state, visit)),
+    assignments: state.assignments.map(toAssignmentView),
     metrics: metricsOf(state),
     activity: [...state.activity].reverse(),
     serverTime,
-    revision: state.revision,
   }
 }

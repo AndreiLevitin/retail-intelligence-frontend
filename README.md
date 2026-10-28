@@ -68,40 +68,49 @@ merged later without restructuring.
 
 `src/services/boardService.ts` is the only contract the UI depends on. No
 component imports a client, touches SQL, or knows whether the board is real.
+Its shapes mirror `retail-intelligence-backend/src/contracts/{dto,errors}.ts`
+exactly — the two repos are separate deployments, so the contract is copied
+into `src/lib/types.ts` rather than imported; keep the two in sync by hand if
+either side changes it.
 
 ```ts
 interface BoardService {
   readonly mode: 'mock' | 'http'
   getBoard(options?: { signal?: AbortSignal }): Promise<BoardSnapshot>
   registerVisitor(command: RegisterVisitorCommand): Promise<void>
-  updateVisitorProfile(command: UpdateProfileCommand): Promise<void>
+  updateAttributes(command: UpdateAttributesCommand): Promise<void>
   acceptAssignment(command: AcceptAssignmentCommand): Promise<void>
   recordOutcome(command: RecordOutcomeCommand): Promise<void>
-  markExit(command: MarkExitCommand): Promise<void>
+  markDeparture(command: MarkDepartureCommand): Promise<void>
   setAvailability(command: SetAvailabilityCommand): Promise<void>
   resetDemo(command: ResetDemoCommand): Promise<void>
 }
 ```
 
-`BoardSnapshot` (see `src/lib/types.ts`) carries `session`, `participants`,
-`visits`, `metrics`, newest-first `activity`, `serverTime` and a monotonic
-`revision`. Mutations return nothing: `useBoard` refetches instead of rotating
-the queue or incrementing a counter locally.
+`BoardSnapshot` (see `src/lib/types.ts`) carries `session`, `associates`,
+`visits`, `assignments`, `metrics`, newest-first `activity` and `serverTime`.
+A visit only carries an `assignmentId`; `src/lib/selectors.ts` joins it against
+`assignments`/`associates` once, so no row component does that lookup itself.
+Mutations return nothing: `useBoard` refetches instead of rotating the queue
+or incrementing a counter locally.
 
-Every mutation carries the `sessionId` it was composed against, plus an
-idempotency key — `eventId` for an intentional registration, `commandId` for
-everything else. A retry reuses the original key.
+Only two commands carry a client idempotency key, matching the backend:
+`eventId` on arrival (register) and `commandId` on an availability change. The
+other commands — accept, outcome, departure, attributes — have none; the
+backend's own current-state check makes a blind retry of those safe and
+reports it back as `replayed`/`duplicate`, so a retry just resends the same
+body.
 
 ### Separate state, never inferred
 
-Service status, physical presence and purchase result are three independent
-columns:
+Visit status, physical presence and purchase outcome are three independent
+fields:
 
-* `serviceStatus` — Waiting / Assigned / Accepted / Completed
+* `status` — Waiting / Assigned / Accepted / Completed
 * presence — derived only from `departedAt`: Inside / Left
-* `purchaseResult` — Sale / No-Sale / **Not recorded** when `null`
+* `outcome` — Sale / No-Sale / **Not recorded** when `null`
 
-`Completed + Inside` is valid; a departed visitor can hold a result with no
+`Completed + Inside` is valid; a departed visitor can hold an outcome with no
 associate and no turn; `null` is displayed as *Not recorded* and never as a
 No-Sale. Appearance joins only the known non-empty parts and falls back to
 *Description not provided*; `Unknown` demographics stay `Unknown`.
@@ -110,12 +119,12 @@ No-Sale. Appearance joins only the known non-empty parts and falls back to
 
 `useBoard` polls `GET /api/board` every 2 s with one request in flight, skips
 a tick while a read is outstanding, and discards any snapshot that started
-before a newer mutation or reset. Within a session an older `revision` can
-never overwrite a newer one. On a read failure the last known board stays
-visible with an offline indicator and the poll keeps retrying; the indicator
-returns to Connected on the next success. Only the affected control is
-disabled while its command is pending, and a reset blocks every mutation until
-the new board has loaded.
+before a newer mutation or reset (tracked by a local generation counter, since
+the DTO itself carries no revision number). On a read failure the last known
+board stays visible with an offline indicator and the poll keeps retrying; the
+indicator returns to Connected on the next success. Only the affected control
+is disabled while its command is pending, and a reset blocks every mutation
+until the new board has loaded.
 
 ## Mock scenarios
 
@@ -159,45 +168,44 @@ plus a render smoke check of the app tree.
 
 ## Remaining API integration work
 
-The HTTP adapter is written but has never run against a live backend. The
-route and field names below are this frontend's **assumption** and must be
-reconciled with the Vercel API — `Prototype Design.md` and
-`Design Class Diagram.md` were not available when this was built.
+The contract below is confirmed against the backend's own canonical,
+dependency-free source — `retail-intelligence-backend/src/contracts/dto.ts`
+and `errors.ts` — not guessed. `src/lib/types.ts`, `httpBoardClient.ts` and
+`boardService.ts` already match it. What is **not yet verified** is running
+the HTTP adapter against a live server:
 
-1. **Confirm the DTO contract.** `src/lib/types.ts` defines `BoardSnapshot`,
-   `VisitDto`, `ParticipantDto`, `AssignmentDto`, `MetricsDto` and
-   `ActivityEntryDto`. Align field names, and confirm `revision` and
-   `serverTime` exist (they drive stale-snapshot rejection and the
-   last-updated label). If `revision` is absent, replace the guard in
-   `useBoard.applySnapshot`.
-2. **Confirm the machine enum values**, which the UI sends verbatim:
-   * age group — `Under20`, `From20To39`, `From40To59`, `Over60`, `Unknown`
-   * gender — `Female`, `Male`, `Unknown`
-   * purchase result — `Sale`, `NoSale`
-   * service status — `Waiting`, `Assigned`, `Accepted`, `Completed`
-   * participant state — `Available`, `OffFloor`, `PendingAcceptance`, `OnUP`
-   * completion reason — `OutcomeRecorded`, `Departure`
-   * source / attributesSource — `Manual`; enrichmentStatus — `NotRequested`
-3. **Confirm the routes** in `BOARD_ROUTES` (`src/services/httpBoardClient.ts`):
-   `GET /api/board`, `POST /api/visits`, `PATCH /api/visits/:id/profile`,
-   `POST /api/assignments/:id/accept`, `POST /api/visits/:id/outcome`,
-   `POST /api/visits/:id/exit`, `POST /api/participants/:id/availability`,
-   `POST /api/demo/reset`.
-4. **Confirm the command envelope.** Each request body is the command object:
-   `sessionId` plus `eventId` or `commandId`. Verify the server treats a
-   replayed key as a no-op and rejects a stale `sessionId`.
-5. **Confirm auth.** The operator token is sent as
-   `Authorization: Bearer <token>`. Agree the real header and whether the
-   token is required at all.
-6. **Confirm the error contract.** `toBoardError` maps 401/403 → Unauthorized,
-   400/409/422 → Conflict, 5xx → Server, and reads a short `message` from the
-   body. The UI shows nothing longer than 160 characters and never shows SQL.
-7. **Switch the adapter.** Set `VITE_BOARD_CLIENT=http`, point
-   `VITE_API_PROXY_TARGET` at the backend for local work, and deploy behind
-   the same origin as `/api`. No screen needs redesigning.
-8. **Then re-run the story checks** against the real path — normal flow,
+1. **Local dev server.** The backend's local dev server (port 3000, matching
+   `VITE_API_PROXY_TARGET`'s default and the Vite proxy in `vite.config.ts`)
+   was still pending as of this check. Once it exists, set
+   `VITE_BOARD_CLIENT=http` and run both `npm run dev` processes side by side.
+2. **Re-run the story checks against the real path** — normal flow,
    Waiting/Off Floor, retries and concurrency, all departure states, a sale
-   without an assignment, and reset with stale writes.
+   without an assignment, and reset with stale writes — the same scenarios
+   `npm test` already covers against the mock engine.
+3. **Watch for contract drift.** If the backend's contract changes, update
+   `src/lib/types.ts`, `src/lib/labels.ts`, `src/lib/selectors.ts`,
+   `mockEngine.ts` and `httpBoardClient.ts` together; they currently agree
+   field-for-field, including:
+   * routes — `POST /api/arrivals`, `PATCH /api/visits/{id}/attributes`,
+     `POST /api/assignments/{id}/accept`, `POST /api/assignments/{id}/outcome`
+     (keyed by **assignment**, not visit), `POST /api/visits/{id}/departure`,
+     `POST /api/availability` (participantId travels in the body, not the URL),
+     `POST /api/demo/reset`
+   * enum values — age group includes `Age60Plus` (not `Over60`); enrichment
+     status is `Complete` (not `Completed`); `attributesSource` also allows
+     `Unknown`
+   * `BoardSnapshot` has `associates` and a sibling `assignments` array, no
+     `participants` key and no `revision`; a `VisitView` carries `status`,
+     `attributes`, `accessoryDescription: string | null`, `outcome`,
+     `outcomeRecordedAt`, `waitingPosition` and a flat `assignmentId` — order
+     is the array position, there is no `registrationOrder` field
+   * `metrics.conversionRate` is already a percentage (0..100), not a 0..1
+     fraction
+   * error bodies are `{code, message}`; `BoardError.fromApi` maps every code
+     in `Backend Requirements.md` §6
+4. **Confirm auth.** The operator token is sent as
+   `Authorization: Bearer <token>`; confirm the real header name and whether
+   a token is required at all in the deployed environment.
 
 ## Deliberately not built
 

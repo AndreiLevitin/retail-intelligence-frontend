@@ -1,12 +1,12 @@
 import { MetricCard } from '../ui/MetricCard.tsx'
 import { formatPercent } from '../../lib/format.ts'
-import type { MetricsDto } from '../../lib/types.ts'
+import type { MetricsView } from '../../lib/types.ts'
 
 /**
  * Five display-only cards. "Shift summary" is a label for the current demo
  * session - it is not a shift-management entity.
  */
-export function ShiftSummary({ metrics }: { metrics: MetricsDto | null }) {
+export function ShiftSummary({ metrics }: { metrics: MetricsView | null }) {
   const value = (amount: number | undefined) => (amount === undefined ? '—' : String(amount))
 
   return (

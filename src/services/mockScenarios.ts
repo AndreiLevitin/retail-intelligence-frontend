@@ -5,9 +5,16 @@
  * always a state the backend could actually produce. `Reset Demo` is an action
  * available in every scenario rather than a scenario of its own.
  */
-import { createSession, markExit, recordOutcome, acceptAssignment, registerVisitor, setAvailability } from './mockEngine.ts'
+import {
+  acceptAssignment,
+  createSession,
+  markDeparture,
+  recordOutcome,
+  registerVisitor,
+  setAvailability,
+} from './mockEngine.ts'
 import type { MockState } from './mockEngine.ts'
-import type { VisitorProfileDto } from '../lib/types.ts'
+import type { VisitorAttributes } from '../lib/types.ts'
 
 export type ScenarioId =
   | 'empty'
@@ -31,18 +38,18 @@ export interface MockScenario {
 
 /* ------------------------------------------------------------- fixtures */
 
-const profiles: Record<string, VisitorProfileDto> = {
+const attributes: Record<string, VisitorAttributes> = {
   puffer: {
     upperDescription: 'Navy puffer jacket',
     lowerDescription: 'Grey jeans',
-    accessory: 'Black backpack',
+    accessoryDescription: 'Black backpack',
     ageGroup: 'From20To39',
     gender: 'Female',
   },
   trench: {
     upperDescription: 'Beige trench coat',
     lowerDescription: 'Black trousers',
-    accessory: '',
+    accessoryDescription: null,
     ageGroup: 'From40To59',
     gender: 'Male',
   },
@@ -51,14 +58,14 @@ const profiles: Record<string, VisitorProfileDto> = {
   unknown: {
     upperDescription: '',
     lowerDescription: '',
-    accessory: '',
+    accessoryDescription: null,
     ageGroup: 'Unknown',
     gender: 'Unknown',
   },
   hoodie: {
     upperDescription: 'Red hoodie',
     lowerDescription: 'Blue shorts',
-    accessory: 'Yellow cap',
+    accessoryDescription: 'Yellow cap',
     ageGroup: 'Under20',
     gender: 'Unknown',
   },
@@ -77,19 +84,25 @@ function freshSession(base: Date): MockState {
 }
 
 /** Registers a visitor and returns the id of the visit just created. */
-function arrive(state: MockState, profile: VisitorProfileDto, when: string): string {
-  registerVisitor(state, { eventId: `seed_evt_${state.visits.length + 1}`, sessionId: state.sessionId, profile }, when)
-  return state.visits[state.visits.length - 1].visitId
+function arrive(state: MockState, profile: VisitorAttributes, when: string, eventId?: string): string {
+  const result = registerVisitor(
+    state,
+    { eventId: eventId ?? `seed_evt_${state.visits.length + 1}`, sessionId: state.sessionId, attributes: profile },
+    when,
+  )
+  return result.visitId
+}
+
+function openAssignmentId(state: MockState, visitId: string): string {
+  const visit = state.visits.find((candidate) => candidate.visitId === visitId)
+  if (visit === undefined) throw new Error(`Scenario seed: unknown visit ${visitId}`)
+  const assignment = state.assignments.find((a) => a.visitId === visitId && a.completedAt === null)
+  if (assignment === undefined) throw new Error(`Scenario seed: no open assignment for ${visitId}`)
+  return assignment.assignmentId
 }
 
 function accept(state: MockState, visitId: string, when: string): void {
-  const assignment = state.assignments.find((a) => a.visitId === visitId && a.completedAt === null)
-  if (assignment === undefined) throw new Error(`Scenario seed: no open assignment for ${visitId}`)
-  acceptAssignment(
-    state,
-    { commandId: `seed_cmd_accept_${assignment.assignmentId}`, sessionId: state.sessionId, assignmentId: assignment.assignmentId },
-    when,
-  )
+  acceptAssignment(state, { sessionId: state.sessionId, assignmentId: openAssignmentId(state, visitId) }, when)
 }
 
 /* ------------------------------------------------------------ scenarios */
@@ -107,7 +120,7 @@ export const MOCK_SCENARIOS: MockScenario[] = [
     description: 'One visitor Assigned; the reserved associate is Pending Acceptance. Accept UP is the next step.',
     build: (base) => {
       const state = freshSession(base)
-      arrive(state, profiles.puffer, at(base, 4))
+      arrive(state, attributes.puffer, at(base, 4))
       return state
     },
   },
@@ -117,7 +130,7 @@ export const MOCK_SCENARIOS: MockScenario[] = [
     description: 'Turn accepted, associate On UP, visitor Accepted and Inside. Sale / No-Sale is available.',
     build: (base) => {
       const state = freshSession(base)
-      const visitId = arrive(state, profiles.puffer, at(base, 4))
+      const visitId = arrive(state, attributes.puffer, at(base, 4))
       accept(state, visitId, at(base, 6))
       return state
     },
@@ -126,14 +139,14 @@ export const MOCK_SCENARIOS: MockScenario[] = [
     id: 'completed-inside',
     label: 'Completed but Inside',
     description:
-      'Sale recorded, so service is Completed while presence is still Inside. The associate is back at the bottom of rotation.',
+      'Sale recorded, so the turn is Completed while presence is still Inside. The associate is back at the bottom of rotation.',
     build: (base) => {
       const state = freshSession(base)
-      const visitId = arrive(state, profiles.trench, at(base, 3))
+      const visitId = arrive(state, attributes.trench, at(base, 3))
       accept(state, visitId, at(base, 5))
       recordOutcome(
         state,
-        { commandId: 'seed_cmd_outcome_1', sessionId: state.sessionId, visitId, result: 'Sale' },
+        { sessionId: state.sessionId, assignmentId: openAssignmentId(state, visitId), outcome: 'Sale' },
         at(base, 12),
       )
       return state
@@ -146,19 +159,19 @@ export const MOCK_SCENARIOS: MockScenario[] = [
       'One associate On UP, one Pending Acceptance, one Off Floor, so the newest visitor stays Waiting with no assignment.',
     build: (base) => {
       const state = freshSession(base)
-      const first = arrive(state, profiles.puffer, at(base, 2))
+      const first = arrive(state, attributes.puffer, at(base, 2))
       accept(state, first, at(base, 4))
-      arrive(state, profiles.trench, at(base, 7))
+      arrive(state, attributes.trench, at(base, 7))
       // The third associate is still idle at this point, so Off Floor is allowed.
       const idle = state.participants.find((p) => p.state === 'Available')
       if (idle !== undefined) {
         setAvailability(
           state,
-          { commandId: 'seed_cmd_offfloor_1', sessionId: state.sessionId, participantId: idle.participantId, state: 'OffFloor' },
+          { sessionId: state.sessionId, participantId: idle.participantId, commandId: 'seed_cmd_offfloor_1', state: 'OffFloor' },
           at(base, 8),
         )
       }
-      arrive(state, profiles.unknown, at(base, 10))
+      arrive(state, attributes.unknown, at(base, 10))
       return state
     },
   },
@@ -169,23 +182,19 @@ export const MOCK_SCENARIOS: MockScenario[] = [
       'A Waiting visitor left with No-Sale recorded and zero assignments - purchase result without an associate or turn.',
     build: (base) => {
       const state = freshSession(base)
-      const first = arrive(state, profiles.puffer, at(base, 2))
+      const first = arrive(state, attributes.puffer, at(base, 2))
       accept(state, first, at(base, 4))
-      arrive(state, profiles.trench, at(base, 6))
+      arrive(state, attributes.trench, at(base, 6))
       const idle = state.participants.find((p) => p.state === 'Available')
       if (idle !== undefined) {
         setAvailability(
           state,
-          { commandId: 'seed_cmd_offfloor_1', sessionId: state.sessionId, participantId: idle.participantId, state: 'OffFloor' },
+          { sessionId: state.sessionId, participantId: idle.participantId, commandId: 'seed_cmd_offfloor_1', state: 'OffFloor' },
           at(base, 7),
         )
       }
-      const waiting = arrive(state, profiles.hoodie, at(base, 9))
-      markExit(
-        state,
-        { commandId: 'seed_cmd_exit_1', sessionId: state.sessionId, visitId: waiting, purchaseResult: 'NoSale' },
-        at(base, 14),
-      )
+      const waiting = arrive(state, attributes.hoodie, at(base, 9))
+      markDeparture(state, { sessionId: state.sessionId, visitId: waiting, outcome: 'NoSale' }, at(base, 14))
       return state
     },
   },
@@ -195,19 +204,15 @@ export const MOCK_SCENARIOS: MockScenario[] = [
     description: 'Exit recorded after a Sale: the existing result is preserved read-only and the queue is untouched.',
     build: (base) => {
       const state = freshSession(base)
-      const visitId = arrive(state, profiles.trench, at(base, 3))
+      const visitId = arrive(state, attributes.trench, at(base, 3))
       accept(state, visitId, at(base, 5))
       recordOutcome(
         state,
-        { commandId: 'seed_cmd_outcome_1', sessionId: state.sessionId, visitId, result: 'Sale' },
+        { sessionId: state.sessionId, assignmentId: openAssignmentId(state, visitId), outcome: 'Sale' },
         at(base, 11),
       )
-      markExit(
-        state,
-        { commandId: 'seed_cmd_exit_1', sessionId: state.sessionId, visitId, purchaseResult: null },
-        at(base, 16),
-      )
-      arrive(state, profiles.hoodie, at(base, 18))
+      markDeparture(state, { sessionId: state.sessionId, visitId, outcome: null }, at(base, 16))
+      arrive(state, attributes.hoodie, at(base, 18))
       return state
     },
   },
@@ -218,7 +223,7 @@ export const MOCK_SCENARIOS: MockScenario[] = [
     failingReads: 2,
     build: (base) => {
       const state = freshSession(base)
-      const visitId = arrive(state, profiles.puffer, at(base, 4))
+      const visitId = arrive(state, attributes.puffer, at(base, 4))
       accept(state, visitId, at(base, 6))
       return state
     },

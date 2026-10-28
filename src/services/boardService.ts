@@ -5,81 +5,111 @@
  * Two adapters implement it with identical DTOs:
  *  - MockBoardClient  - deterministic in-memory scenarios for frontend review
  *  - HttpBoardClient  - same-origin /api calls against the Vercel backend
+ *
+ * Command shapes mirror the backend's public contract exactly: only arrival
+ * and availability carry a client idempotency key (`eventId` / `commandId`);
+ * accept, outcome, departure and attributes do not, because the backend's
+ * own current-state check makes a blind retry of those safe.
  */
-import type { BoardSnapshot, ParticipantState, PurchaseResult, VisitorProfileDto } from '../lib/types.ts'
+import type { AvailabilityState, BoardSnapshot, Outcome, VisitorAttributes } from '../lib/types.ts'
 
 export type BoardServiceMode = 'mock' | 'http'
 
-/** Every mutation carries the session it was composed against. */
 interface SessionScoped {
   sessionId: string
 }
 
-/** `eventId` makes a resubmitted registration a no-op instead of a duplicate. */
+/** POST /api/arrivals */
 export interface RegisterVisitorCommand extends SessionScoped {
   eventId: string
-  profile: VisitorProfileDto
+  attributes: VisitorAttributes
 }
 
-export interface UpdateProfileCommand extends SessionScoped {
-  commandId: string
+/** PATCH /api/visits/{visitId}/attributes - full replacement, no client key. */
+export interface UpdateAttributesCommand extends SessionScoped {
   visitId: string
-  profile: VisitorProfileDto
+  attributes: VisitorAttributes
 }
 
-/** Identifies the assignment, not a manually chosen associate. */
+/** POST /api/assignments/{assignmentId}/accept */
 export interface AcceptAssignmentCommand extends SessionScoped {
-  commandId: string
   assignmentId: string
 }
 
+/** POST /api/assignments/{assignmentId}/outcome - keyed by assignment, not visit. */
 export interface RecordOutcomeCommand extends SessionScoped {
-  commandId: string
-  visitId: string
-  result: PurchaseResult
+  assignmentId: string
+  outcome: Outcome
 }
 
-export interface MarkExitCommand extends SessionScoped {
-  commandId: string
+/** POST /api/visits/{visitId}/departure */
+export interface MarkDepartureCommand extends SessionScoped {
   visitId: string
-  /** Required only when the visit has no recorded outcome yet. */
-  purchaseResult: PurchaseResult | null
+  /** Required only when the visit has no stored outcome yet. */
+  outcome: Outcome | null
 }
 
+/** POST /api/availability - participantId travels in the body, not the URL. */
 export interface SetAvailabilityCommand extends SessionScoped {
-  commandId: string
   participantId: string
-  state: Extract<ParticipantState, 'Available' | 'OffFloor'>
+  commandId: string
+  state: AvailabilityState
 }
 
-/** Reset is not session scoped - it replaces the session. */
-export interface ResetDemoCommand {
-  commandId: string
-}
+/** POST /api/demo/reset - session-scoped: a stale sessionId is rejected. */
+export interface ResetDemoCommand extends SessionScoped {}
 
 export interface BoardService {
   readonly mode: BoardServiceMode
   /** Reads the authoritative board. Supports abort so polls never overlap. */
   getBoard(options?: { signal?: AbortSignal }): Promise<BoardSnapshot>
   registerVisitor(command: RegisterVisitorCommand): Promise<void>
-  updateVisitorProfile(command: UpdateProfileCommand): Promise<void>
+  updateAttributes(command: UpdateAttributesCommand): Promise<void>
   acceptAssignment(command: AcceptAssignmentCommand): Promise<void>
   recordOutcome(command: RecordOutcomeCommand): Promise<void>
-  markExit(command: MarkExitCommand): Promise<void>
+  markDeparture(command: MarkDepartureCommand): Promise<void>
   setAvailability(command: SetAvailabilityCommand): Promise<void>
   resetDemo(command: ResetDemoCommand): Promise<void>
 }
 
+/** The backend's stable error codes (Backend Requirements.md section 6). */
+export type ApiErrorCode =
+  | 'VALIDATION_ERROR'
+  | 'OUTCOME_REQUIRED'
+  | 'UNAUTHORIZED'
+  | 'NOT_FOUND'
+  | 'METHOD_NOT_ALLOWED'
+  | 'STALE_SESSION'
+  | 'INVALID_TRANSITION'
+  | 'REPLAY_CONFLICT'
+  | 'OUTCOME_CONFLICT'
+  | 'INTERNAL_ERROR'
+  | 'DATABASE_UNAVAILABLE'
+
 export type BoardErrorCode =
   /** Transport failed - last known board stays visible, retry is safe. */
   | 'Network'
-  /** Server refused the transition (stale session, conflicting outcome). */
+  /** Server refused the transition (stale session, conflicting outcome, bad input). */
   | 'Conflict'
   /** Operator token missing or rejected. */
   | 'Unauthorized'
   /** Backend fault. */
   | 'Server'
   | 'Unknown'
+
+const API_CODE_TO_BOARD_ERROR: Record<ApiErrorCode, { code: BoardErrorCode; retryable: boolean }> = {
+  VALIDATION_ERROR: { code: 'Conflict', retryable: false },
+  OUTCOME_REQUIRED: { code: 'Conflict', retryable: false },
+  UNAUTHORIZED: { code: 'Unauthorized', retryable: false },
+  NOT_FOUND: { code: 'Conflict', retryable: false },
+  METHOD_NOT_ALLOWED: { code: 'Unknown', retryable: false },
+  STALE_SESSION: { code: 'Conflict', retryable: false },
+  INVALID_TRANSITION: { code: 'Conflict', retryable: false },
+  REPLAY_CONFLICT: { code: 'Conflict', retryable: false },
+  OUTCOME_CONFLICT: { code: 'Conflict', retryable: false },
+  INTERNAL_ERROR: { code: 'Server', retryable: true },
+  DATABASE_UNAVAILABLE: { code: 'Server', retryable: true },
+}
 
 /**
  * Short, operator-readable failure. SQL text and stack details never reach
@@ -88,14 +118,26 @@ export type BoardErrorCode =
 export class BoardError extends Error {
   readonly code: BoardErrorCode
   readonly retryable: boolean
+  readonly apiCode?: ApiErrorCode
   readonly status?: number
 
-  constructor(code: BoardErrorCode, message: string, options?: { retryable?: boolean; status?: number }) {
+  constructor(
+    code: BoardErrorCode,
+    message: string,
+    options?: { retryable?: boolean; status?: number; apiCode?: ApiErrorCode },
+  ) {
     super(message)
     this.name = 'BoardError'
     this.code = code
     this.status = options?.status
+    this.apiCode = options?.apiCode
     this.retryable = options?.retryable ?? (code === 'Network' || code === 'Server')
+  }
+
+  /** Builds a BoardError from the backend's {code, message} response body. */
+  static fromApi(apiCode: ApiErrorCode, message: string, status: number): BoardError {
+    const mapped = API_CODE_TO_BOARD_ERROR[apiCode] ?? { code: 'Unknown' as const, retryable: false }
+    return new BoardError(mapped.code, message, { retryable: mapped.retryable, status, apiCode })
   }
 }
 

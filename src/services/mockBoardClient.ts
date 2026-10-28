@@ -7,12 +7,12 @@ import { BoardError } from './boardService.ts'
 import type {
   AcceptAssignmentCommand,
   BoardService,
-  MarkExitCommand,
+  MarkDepartureCommand,
   RecordOutcomeCommand,
   RegisterVisitorCommand,
   ResetDemoCommand,
   SetAvailabilityCommand,
-  UpdateProfileCommand,
+  UpdateAttributesCommand,
 } from './boardService.ts'
 import * as engine from './mockEngine.ts'
 import type { MockState } from './mockEngine.ts'
@@ -55,7 +55,6 @@ export class MockBoardClient implements BoardService, MockBoardController {
   private state: MockState
   private scenario: ScenarioId
   private pendingFailures: number
-  private sessionSeq = 0
 
   constructor(scenarioId: ScenarioId = DEFAULT_SCENARIO_ID) {
     this.scenario = scenarioId
@@ -92,8 +91,8 @@ export class MockBoardClient implements BoardService, MockBoardController {
     await this.write(() => engine.registerVisitor(this.state, command, this.now()))
   }
 
-  async updateVisitorProfile(command: UpdateProfileCommand): Promise<void> {
-    await this.write(() => engine.updateVisitorProfile(this.state, command, this.now()))
+  async updateAttributes(command: UpdateAttributesCommand): Promise<void> {
+    await this.write(() => engine.updateAttributes(this.state, command, this.now()))
   }
 
   async acceptAssignment(command: AcceptAssignmentCommand): Promise<void> {
@@ -104,21 +103,29 @@ export class MockBoardClient implements BoardService, MockBoardController {
     await this.write(() => engine.recordOutcome(this.state, command, this.now()))
   }
 
-  async markExit(command: MarkExitCommand): Promise<void> {
-    await this.write(() => engine.markExit(this.state, command, this.now()))
+  async markDeparture(command: MarkDepartureCommand): Promise<void> {
+    await this.write(() => engine.markDeparture(this.state, command, this.now()))
   }
 
   async setAvailability(command: SetAvailabilityCommand): Promise<void> {
     await this.write(() => engine.setAvailability(this.state, command, this.now()))
   }
 
-  async resetDemo(_command: ResetDemoCommand): Promise<void> {
+  async resetDemo(command: ResetDemoCommand): Promise<void> {
     await delay(WRITE_LATENCY_MS)
+    // The reset itself is session-scoped: a stale sessionId (e.g. a second
+    // click's request, issued against an already-replaced session) is
+    // rejected rather than silently creating another fresh run.
+    if (command.sessionId !== this.state.sessionId) {
+      throw new BoardError('Conflict', 'This demo session was already reset.', {
+        retryable: false,
+        apiCode: 'STALE_SESSION',
+      })
+    }
     // One step: new session identity and start time, old demo data gone,
     // participants reseeded Available in initial order. The roster itself
     // (associateId / displayName) is persistent and is not cleared.
-    this.sessionSeq += 1
-    this.state = engine.createSession(`ses_reset_${this.sessionSeq}`, new Date().toISOString())
+    this.state = engine.createSession(`ses_${Date.now().toString(36)}`, new Date().toISOString())
   }
 
   private now(): string {

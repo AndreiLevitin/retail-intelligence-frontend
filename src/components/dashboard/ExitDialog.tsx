@@ -3,18 +3,20 @@ import { Button } from '../ui/Button.tsx'
 import { Dialog } from '../ui/Dialog.tsx'
 import { Notice } from '../ui/Notice.tsx'
 import { StatusBadge } from '../ui/StatusBadge.tsx'
-import { describeAppearance, purchaseResultLabel, purchaseResultTone } from '../../lib/labels.ts'
-import type { PurchaseResult, VisitDto } from '../../lib/types.ts'
+import { describeAppearance, outcomeLabel, outcomeTone } from '../../lib/labels.ts'
+import type { Outcome, VisitView } from '../../lib/types.ts'
 
 interface ExitDialogProps {
-  visit: VisitDto
+  visit: VisitView
+  /** Resolved separately: a visit only carries an assignmentId on the wire. */
+  associateName: string | null
   pending: boolean
   errorMessage?: string
-  onCommit: (purchaseResult: PurchaseResult | null) => void
+  onCommit: (outcome: Outcome | null) => void
   onCancel: () => void
 }
 
-const OUTCOME_CHOICES: ReadonlyArray<{ value: PurchaseResult; label: string }> = [
+const OUTCOME_CHOICES: ReadonlyArray<{ value: Outcome; label: string }> = [
   { value: 'Sale', label: 'Sale' },
   { value: 'NoSale', label: 'No-Sale' },
 ]
@@ -29,10 +31,10 @@ const OUTCOME_CHOICES: ReadonlyArray<{ value: PurchaseResult; label: string }> =
  * `visit` is the live row, so the dialog follows server state while open; the
  * component is mounted per opening, which keeps the selection stable.
  */
-export function ExitDialog({ visit, pending, errorMessage, onCommit, onCancel }: ExitDialogProps) {
-  const [choice, setChoice] = useState<PurchaseResult | null>(null)
+export function ExitDialog({ visit, associateName, pending, errorMessage, onCommit, onCancel }: ExitDialogProps) {
+  const [choice, setChoice] = useState<Outcome | null>(null)
 
-  const hasResult = visit.purchaseResult !== null
+  const hasResult = visit.outcome !== null
   const canCommit = hasResult || choice !== null
 
   return (
@@ -63,11 +65,11 @@ export function ExitDialog({ visit, pending, errorMessage, onCommit, onCancel }:
       <dl className="grid gap-2 rounded-panel border border-line bg-page p-4 text-body">
         <div className="flex gap-2">
           <dt className="text-muted">Visitor</dt>
-          <dd className="text-ink">{describeAppearance(visit.profile)}</dd>
+          <dd className="text-ink">{describeAppearance(visit.attributes)}</dd>
         </div>
         <div className="flex gap-2">
           <dt className="text-muted">Assigned associate</dt>
-          <dd className="text-ink">{visit.assignment?.participantName ?? 'None'}</dd>
+          <dd className="text-ink">{associateName ?? 'None'}</dd>
         </div>
       </dl>
 
@@ -75,9 +77,7 @@ export function ExitDialog({ visit, pending, errorMessage, onCommit, onCancel }:
         <div className="flex flex-col gap-2">
           <span className="text-label font-medium text-muted">Purchase result (already recorded)</span>
           <div>
-            <StatusBadge tone={purchaseResultTone(visit.purchaseResult)}>
-              {purchaseResultLabel(visit.purchaseResult)}
-            </StatusBadge>
+            <StatusBadge tone={outcomeTone(visit.outcome)}>{outcomeLabel(visit.outcome)}</StatusBadge>
           </div>
           <p className="text-label text-muted">
             The existing result is preserved; the exit does not change it.
