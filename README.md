@@ -220,38 +220,31 @@ plus a render smoke check of the app tree.
 
 ## Remaining API integration work
 
-**Current status: the rotation rule was corrected again after that
-verification, and `.env.local` is pinned back to `VITE_BOARD_CLIENT=mock`
-pending the backend's second migration pass.** The contract-v2 verification
-below (8 endpoints, CORS, error shapes, DTO field names) is still valid and
-doesn't need redoing - only the *rotation behaviour itself* changed: the
-backend's reported migration implemented a single store-wide pending-offer
-gate, which the user confirmed is wrong (it should be per-associate; see
-`Assignment Rotation Revision.md`'s correction note). This frontend's
-`mockEngine.ts` has the corrected per-associate rule; the backend needs a
-second rotation pass (different unique index, dispatcher, accept/departure/
-availability logic - same files as the first migration) before switching
-back to `http` mode.
+**Verified end-to-end against the per-associate rotation fix (contract
+v3)**, locally, after the backend's second migration pass
+(`20261028000100_per_associate_offers.sql`):
 
-Prior verification against contract v2, still valid: every one of the 8
-endpoints, CORS preflight + an allowed-origin GET + a disallowed origin's
-403 `ORIGIN_NOT_ALLOWED`, and 404/405/400 shapes. The demo was reset to a
-clean run afterward. Once the backend's rotation logic is corrected,
-re-verify specifically:
+* Three simultaneous arrivals went to three different associates in
+  parallel (confirmed on data the live migration had itself converted:
+  Alex/Jamie/Morgan each held their own `PendingAcceptance` offer
+  simultaneously, all three `Available`).
+* A fourth arrival stayed `Waiting` until one offer was accepted; accepting
+  Alex's immediately re-offered the Waiting visitor to Alex (the "Second
+  UP" case), with the new assignment's id matching exactly.
+* `queuePosition` moves at **offer** time, not accept time - proved both
+  ways: Alex's rank changed as part of the *same* accept call only because
+  a new offer followed; a second accept (Jamie's, with no Waiting visitor
+  left to offer) left every associate's `queuePosition` completely
+  unchanged.
+* Off Floor 409s `INVALID_TRANSITION` precisely for whichever associate
+  currently holds *their own* pending offer (checked for two different
+  associates in turn, including Alex immediately after his re-offer) and
+  would succeed for one with only accepted-unfinished work.
+* CORS preflight + an allowed-origin GET for `http://localhost:5181`, and
+  401/404/405 error shapes, are unchanged from the contract-v2 sweep.
 
-* Three simultaneous arrivals go to three different associates in
-  parallel (no session-wide queuing).
-* A fourth arrival waits only once all three simultaneously hold their own
-  pending offer; accepting one immediately offers it the Waiting visitor.
-* Off Floor succeeds for an associate with only accepted-unfinished work,
-  and 409s only for the one associate who owns a pending offer - not for
-  every associate just because *someone* has one.
-* `queuePosition` moves at offer time (not accept time) - confirm this by
-  checking the newly-offered associate's rank changes immediately, before
-  any Accept call.
-
-What is still open before a real deployment, independent of the rotation
-fix:
+The demo was reset to a clean run afterward and `.env.local` is back to
+`VITE_BOARD_CLIENT=http`. What is still open before a real deployment:
 
 1. **`VITE_API_BASE_URL` / CORS allowlist for the actual deployed origins**,
    not just `localhost:5173/5181`. The backend's `CORS_ALLOWED_ORIGINS` needs
@@ -265,7 +258,7 @@ fix:
    deployed, the same scenarios `npm test` already covers against the mock
    engine.
 4. **Watch for further contract drift** (backend is on
-   `src/contracts/dto.ts`'s `CONTRACT_VERSION = 2`; bump this note if that
+   `src/contracts/dto.ts`'s `CONTRACT_VERSION = 3`; bump this note if that
    changes again). If it does, update `src/lib/types.ts`,
    `src/lib/labels.ts`, `src/lib/selectors.ts`, `mockEngine.ts` and
    `httpBoardClient.ts` together; they currently agree field-for-field,
