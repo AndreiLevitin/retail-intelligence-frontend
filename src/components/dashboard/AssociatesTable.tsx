@@ -20,8 +20,9 @@ interface AssociatesTableProps {
 /**
  * Secondary table. Availability (Available/OffFloor) and assignment work are
  * shown as two independent facts: accepted, unfinished turns never make an
- * associate ineligible, and a pending offer blocks a new one only through the
- * session-wide gate, not through this associate's own state.
+ * associate ineligible for a new offer. Each associate can hold at most one
+ * unconfirmed offer of their own at a time - that is a per-associate limit,
+ * not a session-wide one, so several associates may each be mid-offer.
  */
 export function AssociatesTable({
   associates,
@@ -55,8 +56,8 @@ export function AssociatesTable({
         width: 'w-40',
         cell: (associate) => {
           // Shown separately from availability: accepted unfinished work is
-          // never evidence of ineligibility, and at most one associate at a
-          // time can hold the session's pending offer.
+          // never evidence of ineligibility, and each associate can hold at
+          // most one unconfirmed offer of their own at a time.
           if (associate.pendingAssignmentId !== null) {
             return <StatusBadge tone="warning">{assignmentPhaseLabels.PendingAcceptance}</StatusBadge>
           }
@@ -119,8 +120,8 @@ export function AssociatesTable({
             )
           }
 
-          // Off Floor is rejected only while this associate owns the
-          // session's one pending offer; accepted work never blocks it.
+          // Off Floor is rejected only while this associate owns their own
+          // unconfirmed offer; accepted work never blocks it.
           const blocked = !canMarkOffFloor(associate)
           return (
             <div className="flex flex-col gap-1">
@@ -134,7 +135,7 @@ export function AssociatesTable({
                 Mark Off Floor
               </Button>
               {blocked ? (
-                <span className="text-label text-muted">Owns the pending offer — resolve it first.</span>
+                <span className="text-label text-muted">Has a pending offer — resolve it first.</span>
               ) : null}
             </div>
           )
@@ -151,8 +152,8 @@ export function AssociatesTable({
           Associates
         </h2>
         <p className="text-label text-muted">
-          Rotation order is server-authoritative. Accepted, unfinished work never blocks a new offer; only the owner
-          of the session's one pending offer cannot go Off Floor.
+          Rotation order is server-authoritative. Accepted, unfinished work never blocks a new offer; an associate
+          can only go Off Floor once their own pending offer is resolved.
         </p>
       </div>
       <DataTable

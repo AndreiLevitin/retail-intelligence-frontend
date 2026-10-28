@@ -199,15 +199,17 @@ export function canMarkExit(visit: VisitView): boolean {
 }
 
 /**
- * Off Floor is rejected only while the associate owns the session's one
- * unresolved pending offer - accepted, unfinished work never blocks it.
+ * Off Floor is rejected only while the associate owns their own unresolved
+ * pending offer - accepted, unfinished work never blocks it. Different
+ * associates may each hold their own pending offer at the same time; this
+ * is a per-associate check, not a session-wide gate.
  * Available -> Available is always allowed (there is nothing to resolve).
  */
 export function canMarkOffFloor(associate: AssociateView): boolean {
   return associate.pendingAssignmentId === null
 }
 
-/** True while any assignment in the session is offered but not yet accepted. */
+/** True while any assignment anywhere in the session is offered but not yet accepted. */
 export function hasPendingOffer(snapshot: BoardSnapshot): boolean {
   return snapshot.assignments.some((assignment) => assignment.phase === 'PendingAcceptance')
 }

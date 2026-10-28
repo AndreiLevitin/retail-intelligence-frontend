@@ -1,20 +1,24 @@
 /**
  * In-memory board engine for MockBoardClient.
  *
- * Implements "Assignment Rotation Revision - Advance on Acceptance":
- *  - an associate's own availability is only Available/OffFloor; accepted,
- *    unfinished work never makes them ineligible, and multiple accepted
- *    unfinished assignments per participant are valid
- *  - at most ONE unresolved pending offer exists across the whole session;
- *    later Waiting visitors wait for it regardless of how many other
- *    associates are Available
- *  - offering a visit never touches the offered participant's queue
- *    position or availability; only *accepting* moves them to the bottom,
- *    exactly once, and immediately tries the next oldest Waiting visit
+ * Implements the corrected rotation rule (per the user's direct description
+ * of the real store process, which superseded the first - wrong - reading
+ * of "Assignment Rotation Revision.md" as a single store-wide offer gate):
+ *  - each associate may hold at most ONE unconfirmed (pending) offer of
+ *    their own at a time; different associates can each simultaneously hold
+ *    their own pending offer - there is no session-wide gate
+ *  - accepted, unfinished work never makes an associate ineligible for a
+ *    new offer; multiple accepted-unfinished assignments per associate are
+ *    valid ("Second UP" and beyond)
+ *  - the queue position moves at OFFER time, not at Accept time: making an
+ *    offer immediately reserves that associate and moves them to the back,
+ *    on the optimistic assumption they will confirm, so the next arrival
+ *    naturally offers to the next associate in line
+ *  - Accept does not move the queue again - it already moved when offered
  *  - a normal outcome (Sale/No-Sale) never changes rotation or availability
- *  - departure of a still-pending offer clears the gate without consuming
- *    the participant's turn or moving the queue; departure of an accepted
- *    or completed turn does not touch rotation either
+ *  - departure of a still-pending offer clears it (reason Departure)
+ *    without any further queue effect - the position already moved at
+ *    offer time and nothing moves it back
  *
  * The rules live here and not in components, so they exist in exactly one
  * place and can be deleted together with the mock adapter. Only arrival
@@ -205,9 +209,11 @@ function findAssignment(state: MockState, assignmentId: string): MockAssignment 
   return assignment
 }
 
-/** The one unresolved offer across the whole session, if any. */
-function pendingOffer(state: MockState): MockAssignment | undefined {
-  return state.assignments.find((a) => a.acceptedAt === null && a.completedAt === null)
+/** The participant's own unresolved (not yet accepted) offer, if any. */
+function pendingOfferOf(state: MockState, participantId: string): MockAssignment | undefined {
+  return state.assignments.find(
+    (a) => a.participantId === participantId && a.acceptedAt === null && a.completedAt === null,
+  )
 }
 
 /** The unfinished (pending or accepted) assignment of a visit, if there is one. */
@@ -220,37 +226,45 @@ function latestAssignmentOfVisit(state: MockState, visitId: string): MockAssignm
   return openAssignmentOfVisit(state, visitId) ?? [...state.assignments].reverse().find((a) => a.visitId === visitId)
 }
 
+/**
+ * Available AND not already holding their own unconfirmed offer. Accepted,
+ * unfinished work does not exclude a participant.
+ */
 function eligibleParticipants(state: MockState): MockParticipant[] {
   return state.participants
-    .filter((p) => p.state === 'Available' && p.queueOrder !== null)
+    .filter((p) => p.state === 'Available' && p.queueOrder !== null && pendingOfferOf(state, p.participantId) === undefined)
     .sort((a, b) => (a.queueOrder ?? 0) - (b.queueOrder ?? 0))
 }
 
-/** Appends a returning or just-accepted participant to the bottom of rotation. */
+/** Appends a returning or just-offered participant to the bottom of rotation. */
 function appendToQueue(state: MockState, participant: MockParticipant): void {
   participant.state = 'Available'
   participant.queueOrder = state.nextQueueOrder++
 }
 
 /**
- * Dense 1-based rank among currently-Available associates, by their raw
- * ordering token. This is what `AssociateView.queuePosition` exposes - the
- * raw token itself only matters for relative order, never on the wire.
+ * Dense 1-based rank among ALL currently-Available associates, by their raw
+ * ordering token - including ones who currently hold their own pending
+ * offer (confirmed against the live backend: an associate with a pending
+ * offer still shows a queuePosition). This is what `AssociateView.queuePosition`
+ * exposes; it is deliberately broader than `eligibleParticipants`, which
+ * additionally excludes pending-offer holders from receiving a *new* one.
  */
 function queueRanks(state: MockState): Map<string, number> {
-  const ranked = eligibleParticipants(state)
+  const ranked = state.participants
+    .filter((p) => p.state === 'Available' && p.queueOrder !== null)
+    .sort((a, b) => (a.queueOrder ?? 0) - (b.queueOrder ?? 0))
   return new Map(ranked.map((participant, index) => [participant.participantId, index + 1]))
 }
 
 /**
- * Creates the session's one offer, if none is currently unresolved: the
- * oldest Waiting visit to the front-of-queue Available participant. Offering
- * never moves the participant or changes their availability - only accepting
- * does that. Returns true when an offer was created.
+ * Offers the oldest Waiting visit to the front-of-queue eligible participant
+ * (Available, not already holding their own unconfirmed offer). The offer
+ * reserves that participant and moves them to the back of the queue right
+ * away, optimistically assuming they will confirm - Accept does not move
+ * the queue again. Returns true when an offer was created.
  */
 function tryCreateOffer(state: MockState, at: string): boolean {
-  if (pendingOffer(state) !== undefined) return false
-
   const visit = state.visits
     .filter((v) => v.status === 'Waiting' && v.departedAt === null)
     .sort((a, b) => a.registrationOrder - b.registrationOrder)[0]
@@ -271,6 +285,8 @@ function tryCreateOffer(state: MockState, at: string): boolean {
   state.assignments.push(assignment)
   participant.assignedTurns += 1
   visit.status = 'Assigned'
+  // Reserve now, on the assumption of acceptance - not when they confirm.
+  appendToQueue(state, participant)
 
   logAt(state, at, 'AssignmentCreated', `UP offered to ${participant.displayName}.`, {
     visitId: visit.visitId,
@@ -366,10 +382,9 @@ export function acceptAssignment(
 
   const participant = findParticipant(state, assignment.participantId)
   participant.acceptedTurns += 1
-  // Advances the queue exactly once, on acceptance - never on offer, outcome
-  // or departure. Accepted, unfinished work never blocks future offers to
-  // this same participant.
-  appendToQueue(state, participant)
+  // The queue already moved when this offer was made - accepting does not
+  // move it again. Clearing the pending offer does make this participant
+  // eligible for a new one, so try once more in case a Waiting visit exists.
 
   logAt(state, at, 'AssignmentAccepted', `${participant.displayName} accepted the UP.`, {
     visitId: visit.visitId,
@@ -377,7 +392,6 @@ export function acceptAssignment(
     assignmentId: assignment.assignmentId,
   })
 
-  // The gate is clear: offer the next oldest Waiting visit, if any.
   tryCreateOffer(state, at)
 }
 
@@ -413,8 +427,8 @@ export function recordOutcome(
 
   assignment.completedAt = at
   assignment.completionReason = 'OutcomeRecorded'
-  // Rotation/availability are untouched: acceptance already advanced the
-  // queue, and a normal outcome never moves it again.
+  // Rotation/availability are untouched: the queue already moved when this
+  // offer was made, and a normal outcome never moves it again.
 
   logAt(state, at, 'TurnCompleted', input.outcome === 'Sale' ? 'Sale recorded.' : 'No-Sale recorded.', {
     visitId: visit.visitId,
@@ -468,17 +482,16 @@ export function markDeparture(
     if (assignment !== undefined) {
       assignment.completedAt = at
       assignment.completionReason = 'Departure'
-      // Pending-offer departure clears the gate without consuming the
-      // participant's turn or moving the queue. An accepted-but-unfinished
-      // departure likewise never touches rotation - acceptance already
-      // moved that participant once, and this does not move them again.
+      // The queue already moved when this offer was made (whether or not
+      // it was ever accepted), so departure never moves it again - there
+      // is nothing left to undo or consume.
     }
   }
 
   logAt(state, at, 'VisitorDeparted', 'Visitor exit recorded.', { visitId: visit.visitId })
 
-  // Harmless no-op unless this departure was the pending offer: then the
-  // gate just cleared and the next oldest Waiting visit can be offered.
+  // Harmless no-op unless this departure cleared this participant's own
+  // pending offer: they're now eligible again, so try a new one for them.
   if (!wasAlreadyComplete) tryCreateOffer(state, at)
 }
 
@@ -501,10 +514,9 @@ export function setAvailability(
   if (participant.state === input.state) return
 
   if (input.state === 'OffFloor') {
-    // Rejected only while this participant owns the one unresolved pending
-    // offer; accepted, unfinished work never blocks it.
-    const offer = pendingOffer(state)
-    if (offer !== undefined && offer.participantId === participant.participantId) {
+    // Rejected only while this participant owns their own unresolved
+    // pending offer; accepted, unfinished work never blocks it.
+    if (pendingOfferOf(state, participant.participantId) !== undefined) {
       throw new BoardError('Conflict', 'Resolve the pending offer before marking Off Floor.', {
         retryable: false,
         apiCode: 'INVALID_TRANSITION',

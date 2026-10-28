@@ -150,11 +150,12 @@ export const MOCK_SCENARIOS: MockScenario[] = [
     id: 'awaiting-confirmation',
     label: 'Awaiting confirmation',
     description:
-      'Only one offer may be unresolved per session. The first visitor is offered; two more arrive and stay Waiting - even though every other associate is still Available - until that one offer is accepted.',
+      'Each associate may hold at most one unconfirmed offer of their own, and the first three visitors take all three - in parallel, not queued behind each other. A fourth visitor then has nobody eligible and waits.',
     build: (base) => {
       const state = freshSession(base)
       arrive(state, attributes.puffer, at(base, 2))
-      arrive(state, attributes.trench, at(base, 5))
+      arrive(state, attributes.trench, at(base, 3))
+      arrive(state, attributes.hoodie, at(base, 4))
       arrive(state, attributes.unknown, at(base, 7))
       return state
     },
@@ -163,11 +164,13 @@ export const MOCK_SCENARIOS: MockScenario[] = [
     id: 'departed-waiting',
     label: 'Departed without assignment',
     description:
-      'A Waiting visitor (blocked behind the one pending offer) left with No-Sale recorded and zero assignments - purchase result without an associate or turn.',
+      'A Waiting visitor (every associate already holding their own offer) left with No-Sale recorded and zero assignments - purchase result without an associate or turn.',
     build: (base) => {
       const state = freshSession(base)
-      arrive(state, attributes.puffer, at(base, 2)) // takes the one offer
-      const waiting = arrive(state, attributes.hoodie, at(base, 6)) // stays Waiting behind it
+      arrive(state, attributes.puffer, at(base, 1))
+      arrive(state, attributes.trench, at(base, 2))
+      arrive(state, attributes.hoodie, at(base, 3))
+      const waiting = arrive(state, attributes.unknown, at(base, 6)) // nobody eligible
       markDeparture(state, { sessionId: state.sessionId, visitId: waiting, outcome: 'NoSale' }, at(base, 14))
       return state
     },

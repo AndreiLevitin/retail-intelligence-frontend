@@ -104,42 +104,54 @@ body.
 
 ### Rotation model: advance on acceptance
 
-Per [Assignment Rotation Revision](../Assignment%20Rotation%20Revision.md)
-(a breaking change over the original "exclusive until outcome" model):
+Per the **corrected** [Assignment Rotation Revision](../Assignment%20Rotation%20Revision.md)
+(a breaking change over the original "exclusive until outcome" model). The
+revision's first version generalized its own rule into a single
+store-wide pending-offer gate; the user corrected this directly against the
+real process the same day, and the document, this frontend and the
+backend all needed a second pass. The rule that actually held:
 
 * An associate's own availability is only `Available`/`OffFloor`
   (`AssociateView.state`). Accepted, unfinished work never makes an
   associate ineligible — `activeTurns`/`activeAssignmentIds` track that
   separately, and any number of accepted-unfinished turns per associate is
-  valid.
-* At most **one** unresolved offer (`PendingAcceptance`) exists across the
-  whole session at a time — not one per associate. A later Waiting visitor
-  waits for *that* offer regardless of how many other associates are
-  Available; `AssociateView.pendingAssignmentId` names its owner.
-* Offering a visit never moves the offered associate's queue position or
-  availability. Only **accepting** does that — exactly once, immediately
-  followed by an attempt to offer the next oldest Waiting visit. A normal
-  outcome (Sale/No-Sale) never touches rotation or availability.
+  valid ("Second UP" and beyond).
+* Each associate may hold at most **one** unresolved offer of their own at
+  a time (`AssociateView.pendingAssignmentId`) — **not a session-wide
+  limit**. Different associates can each hold their own pending offer
+  simultaneously; a new arrival goes to whichever eligible associate
+  (Available, no pending offer of their own) is next in queue order, not
+  to a single bottleneck.
+* The queue position moves at **offer** time, not at Accept time: creating
+  an offer immediately reserves that associate and moves them to the back
+  of the queue, on the optimistic assumption they will confirm — this is
+  exactly what lets the next arrival go to a *different* associate instead
+  of queuing up behind an unconfirmed one. Accepting does not move the
+  queue again; it already moved when offered. Clearing a pending offer
+  (by accepting, or by the visitor departing before confirming) makes that
+  one associate eligible again for a new offer. A normal outcome
+  (Sale/No-Sale) never touches rotation or availability.
 * Departure of a still-pending offer closes it (`completionReason:
-  "Departure"`) and clears the gate without consuming the associate's turn
-  or moving the queue. Departure of an accepted or completed turn doesn't
-  touch rotation either.
-* Off Floor is rejected only while that associate owns the session's one
-  pending offer (`canMarkOffFloor` in `src/lib/types.ts`) — never because of
-  accepted-unfinished work.
+  "Departure"`); the queue already moved when that offer was made, so
+  nothing moves again and nothing is "returned" — it just frees that one
+  associate. Departure of an accepted or completed turn doesn't touch
+  rotation either.
+* Off Floor is rejected only while that associate owns their **own**
+  unresolved pending offer (`canMarkOffFloor` in `src/lib/types.ts`) — a
+  per-associate check, never because of accepted-unfinished work and never
+  because of a *different* associate's offer.
 * A Waiting visit's "no assignment" reason is exactly one of two things,
-  computed in `DashboardPage.explainWaiting`: *Awaiting confirmation* (the
-  one pending offer is unresolved) or *No available associates* (nobody is
-  Available). "All associates busy" is never shown — accepted-unfinished
-  work is not a reason.
-* The one pending offer, if any, is also highlighted above the Visitors
-  table with its own Accept UP button (`findPendingOffer` in
-  `src/lib/selectors.ts`), not just inside its table row.
+  computed in `DashboardPage.explainWaiting`: *No available associates*
+  (nobody is Available) or *Every available associate already has an
+  offer pending confirmation* (each one is individually, simultaneously
+  mid-offer). "All associates busy" is never shown — accepted-unfinished
+  work is not a reason, and there is no single global bottleneck to name.
 
 `mockEngine.test.ts` includes the backlog's required A → B → C → A
-regression: four sequential arrivals and acceptances cycle through every
-associate without ever completing a sale, proving the gate — not individual
-associate exclusivity — is what serializes offers.
+regression: with four simultaneous arrivals, the first three are offered
+to A, B and C **in parallel** (not queued behind each other), and the
+fourth cycles back to whichever of them accepts first — all without ever
+completing a sale.
 
 ### Separate state, never inferred
 
@@ -208,14 +220,38 @@ plus a render smoke check of the app tree.
 
 ## Remaining API integration work
 
-**Verified end-to-end against the migrated (contract v2) backend**, locally:
-every one of the 8 endpoints, the A → B → C → A acceptance cycle (no sale
-completed, each associate offered in turn), a pending-offer departure
-clearing the gate without moving the queue or consuming the turn, Off Floor
-succeeding for accepted-unfinished work but 409-rejected for the
-pending-offer owner, CORS preflight + an allowed-origin GET + a disallowed
-origin's 403 `ORIGIN_NOT_ALLOWED`, and 404/405/400 shapes. The demo was reset
-to a clean run afterward. What is still open before a real deployment:
+**Current status: the rotation rule was corrected again after that
+verification, and `.env.local` is pinned back to `VITE_BOARD_CLIENT=mock`
+pending the backend's second migration pass.** The contract-v2 verification
+below (8 endpoints, CORS, error shapes, DTO field names) is still valid and
+doesn't need redoing - only the *rotation behaviour itself* changed: the
+backend's reported migration implemented a single store-wide pending-offer
+gate, which the user confirmed is wrong (it should be per-associate; see
+`Assignment Rotation Revision.md`'s correction note). This frontend's
+`mockEngine.ts` has the corrected per-associate rule; the backend needs a
+second rotation pass (different unique index, dispatcher, accept/departure/
+availability logic - same files as the first migration) before switching
+back to `http` mode.
+
+Prior verification against contract v2, still valid: every one of the 8
+endpoints, CORS preflight + an allowed-origin GET + a disallowed origin's
+403 `ORIGIN_NOT_ALLOWED`, and 404/405/400 shapes. The demo was reset to a
+clean run afterward. Once the backend's rotation logic is corrected,
+re-verify specifically:
+
+* Three simultaneous arrivals go to three different associates in
+  parallel (no session-wide queuing).
+* A fourth arrival waits only once all three simultaneously hold their own
+  pending offer; accepting one immediately offers it the Waiting visitor.
+* Off Floor succeeds for an associate with only accepted-unfinished work,
+  and 409s only for the one associate who owns a pending offer - not for
+  every associate just because *someone* has one.
+* `queuePosition` moves at offer time (not accept time) - confirm this by
+  checking the newly-offered associate's rank changes immediately, before
+  any Accept call.
+
+What is still open before a real deployment, independent of the rotation
+fix:
 
 1. **`VITE_API_BASE_URL` / CORS allowlist for the actual deployed origins**,
    not just `localhost:5173/5181`. The backend's `CORS_ALLOWED_ORIGINS` needs

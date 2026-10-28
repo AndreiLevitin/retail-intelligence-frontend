@@ -9,13 +9,11 @@ import { VisitorForm } from './VisitorForm.tsx'
 import type { VisitorFormMode } from './VisitorForm.tsx'
 import { ShiftSummary } from './ShiftSummary.tsx'
 import { VisitorsTable } from './VisitorsTable.tsx'
-import { Button } from '../ui/Button.tsx'
 import { Notice } from '../ui/Notice.tsx'
 import type { TableState } from '../ui/DataTable.tsx'
 import { actionKeys, useBoard } from '../../hooks/useBoard.ts'
 import { formatTimeWithSeconds } from '../../lib/format.ts'
-import { describeAppearance } from '../../lib/labels.ts'
-import { buildVisitRows, findPendingOffer } from '../../lib/selectors.ts'
+import { buildVisitRows } from '../../lib/selectors.ts'
 import type { VisitRow } from '../../lib/selectors.ts'
 import type { AvailabilityState, BoardSnapshot, Outcome, VisitorAttributes } from '../../lib/types.ts'
 import { boardService, boardServiceMode, mockController } from '../../services/index.ts'
@@ -52,9 +50,6 @@ export function DashboardPage() {
 
   /** Explains a Waiting visit with no assignment, from the current snapshot. */
   const waitingExplanation = useMemo(() => (snapshot === null ? null : explainWaiting(snapshot)), [snapshot])
-
-  /** The session's one unresolved offer, if any - highlighted above the table. */
-  const pendingOffer = useMemo(() => (snapshot === null ? null : findPendingOffer(snapshot)), [snapshot])
 
   /** Always the live row, so an open dialog follows server state. */
   const activeRow = useMemo<VisitRow | null>(() => {
@@ -156,26 +151,6 @@ export function DashboardPage() {
 
       <ShiftSummary metrics={snapshot?.metrics ?? null} />
 
-      {pendingOffer !== null ? (
-        <Notice tone="info" title="One offer is pending — later arrivals wait for it">
-          <p>
-            {describeAppearance(pendingOffer.visit.attributes)} is offered to {pendingOffer.associateName}. No other
-            offer is made until this one is accepted.
-          </p>
-          <div className="mt-2">
-            <Button
-              size="sm"
-              variant="primary"
-              disabled={mutationsBlocked}
-              pending={board.isPending(actionKeys.accept(pendingOffer.visit.visitId))}
-              onClick={() => void board.acceptUp(pendingOffer.visit.visitId, pendingOffer.assignment.assignmentId)}
-            >
-              Accept UP
-            </Button>
-          </div>
-        </Notice>
-      ) : null}
-
       <VisitorsTable
         rows={visitRows}
         state={tableState}
@@ -256,18 +231,18 @@ export function DashboardPage() {
 }
 
 /**
- * A Waiting visit has no assignment for exactly one of two reasons: the
- * session's one pending offer is unresolved (regardless of how many other
- * associates are Available - that is the point of the gate), or nobody is
- * Available at all. Accepted, unfinished work is never a reason - it does
- * not make an associate ineligible, so it must never be implied here.
+ * A Waiting visit has no assignment for exactly one of two reasons: nobody
+ * is Available at all, or every Available associate already holds their own
+ * unconfirmed offer (each associate allows at most one at a time, but
+ * different associates can each hold one in parallel - there is no
+ * session-wide gate). Accepted, unfinished work is never a reason - it
+ * does not make an associate ineligible, so it must never be implied here.
  */
 function explainWaiting(snapshot: BoardSnapshot): string | null {
-  if (snapshot.assignments.some((assignment) => assignment.phase === 'PendingAcceptance')) {
-    return 'Awaiting confirmation of the one pending offer.'
-  }
-  if (!snapshot.associates.some((associate) => associate.state === 'Available')) {
-    return 'No available associates.'
+  const available = snapshot.associates.filter((associate) => associate.state === 'Available')
+  if (available.length === 0) return 'No available associates.'
+  if (available.every((associate) => associate.pendingAssignmentId !== null)) {
+    return 'Every available associate already has an offer pending confirmation.'
   }
   return null
 }

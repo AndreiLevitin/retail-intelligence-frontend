@@ -1,9 +1,11 @@
 /**
  * Story-level checks on the mock engine. These verify the transitions the
- * stories describe under "Assignment Rotation Revision - Advance on
- * Acceptance": US-01 initial order, US-02 registration and idempotency,
- * US-03 accept/outcome, US-04 departure, US-05 the single pending-offer
- * gate and availability, US-06 reset and stale sessions.
+ * stories describe under the corrected rotation rule - each associate may
+ * hold at most one unconfirmed offer of their own, the queue moves at offer
+ * time not accept time, and there is no session-wide gate: US-01 initial
+ * order, US-02 registration and idempotency, US-03 accept/outcome, US-04
+ * departure, US-05 per-associate offer exclusivity and availability, US-06
+ * reset and stale sessions.
  */
 import { describe, expect, it } from 'vitest'
 import { BoardError } from './boardService.ts'
@@ -84,15 +86,17 @@ describe('US-01 opening the board', () => {
 })
 
 describe('US-02 registering a visitor', () => {
-  it('offers the first visitor to the front-of-queue associate, keeping their queue position', () => {
+  it('offers the first visitor to the front-of-queue associate and moves them to the back immediately', () => {
     const state = session()
     const visitId = arrive(state, 2)
     const board = snap(state)
 
     expect(visitOf(state, visitId).status).toBe('Assigned')
-    // Offering never moves the participant or changes their availability.
+    // The queue moves at offer time, not at Accept: the offered associate
+    // is reserved and immediately pushed to the back (rank 3 of 3), on the
+    // optimistic assumption they will confirm.
     expect(board.associates[0].state).toBe('Available')
-    expect(board.associates[0].queuePosition).toBe(1)
+    expect(board.associates[0].queuePosition).toBe(3)
     expect(board.associates[0].pendingAssignmentId).not.toBeNull()
     expect(board.associates[0].assignedTurns).toBe(1)
   })
@@ -145,10 +149,11 @@ describe('US-02 registering a visitor', () => {
 })
 
 describe('US-03 accepting and completing a turn', () => {
-  it('accepts, moves the participant to the queue bottom exactly once, and keeps them Available', () => {
+  it('accepting does not move the queue again - it already moved when offered', () => {
     const state = session()
     const visitId = arrive(state, 2)
     const first = snap(state).associates[0].participantId
+    const rankAfterOffer = associateOf(state, first).queuePosition
     accept(state, visitId, 4)
     const board = snap(state)
 
@@ -159,11 +164,7 @@ describe('US-03 accepting and completing a turn', () => {
     expect(accepted.pendingAssignmentId).toBeNull()
     expect(accepted.activeTurns).toBe(1)
     expect(accepted.acceptedTurns).toBe(1)
-    // Moved to the bottom: queuePosition is a dense 1..N rank among
-    // Available associates (confirmed against the live backend), so the
-    // just-accepted participant becomes rank 3 of 3, not a raw ever-growing
-    // token value.
-    expect(accepted.queuePosition).toBe(3)
+    expect(accepted.queuePosition).toBe(rankAfterOffer)
   })
 
   it('completes the turn without touching rotation or availability; visitor stays Inside', () => {
@@ -242,79 +243,86 @@ describe('US-03 accepting and completing a turn', () => {
   })
 })
 
-describe('US-05 rotation: at most one unresolved offer per session', () => {
-  it('offers A, B and C in turn as each accepts - the A -> B -> C -> A regression', () => {
+describe('US-05 rotation: at most one unresolved offer per associate', () => {
+  it('offers three simultaneous arrivals to three different associates - no session-wide gate', () => {
     const state = session()
     const [a, b, c] = snap(state).associates.map((p) => p.participantId)
 
     const v1 = arrive(state, 1, 'evt_1')
-    expect(visitOf(state, v1).status).toBe('Assigned')
-    expect(associateOf(state, a).pendingAssignmentId).not.toBeNull()
-
     const v2 = arrive(state, 2, 'evt_2')
     const v3 = arrive(state, 3, 'evt_3')
-    const v4 = arrive(state, 4, 'evt_4')
-    // All three remain Available; none is "busy" - only the gate blocks offers.
-    expect(snap(state).associates.every((p) => p.state === 'Available')).toBe(true)
-    expect(visitOf(state, v2).status).toBe('Waiting')
-    expect(visitOf(state, v3).status).toBe('Waiting')
-    expect(visitOf(state, v4).status).toBe('Waiting')
 
-    accept(state, v1, 5) // A accepts -> offer V2 to B
-    // Dense rank, not a raw token: the just-accepted associate is always
-    // rank 3 of 3 (confirmed against the live backend).
-    expect(associateOf(state, a).queuePosition).toBe(3)
+    // Each gets its own associate, in queue order - none is left Waiting
+    // behind someone else's unconfirmed offer.
+    expect(visitOf(state, v1).status).toBe('Assigned')
     expect(visitOf(state, v2).status).toBe('Assigned')
-    expect(associateOf(state, b).pendingAssignmentId).not.toBeNull()
-
-    accept(state, v2, 6) // B accepts -> offer V3 to C
-    expect(associateOf(state, b).queuePosition).toBe(3)
     expect(visitOf(state, v3).status).toBe('Assigned')
-    expect(associateOf(state, c).pendingAssignmentId).not.toBeNull()
 
-    accept(state, v3, 7) // C accepts -> offer V4 to A, even though A's V1 is still unfinished
-    expect(associateOf(state, c).queuePosition).toBe(3)
+    const assignmentFor = (visitId: string) => snap(state).assignments.find((asg) => asg.visitId === visitId)
+    expect(assignmentFor(v1)?.participantId).toBe(a)
+    expect(assignmentFor(v2)?.participantId).toBe(b)
+    expect(assignmentFor(v3)?.participantId).toBe(c)
+    expect(snap(state).associates.every((p) => p.state === 'Available')).toBe(true)
+    expect(snap(state).associates.every((p) => p.pendingAssignmentId !== null)).toBe(true)
+
+    // Now every associate already holds their own unconfirmed offer: a
+    // fourth arrival has nobody eligible and must wait.
+    const v4 = arrive(state, 4, 'evt_4')
+    expect(visitOf(state, v4).status).toBe('Waiting')
+    expect(hasPendingOffer(snap(state))).toBe(true)
+
+    // Accepting clears that one offer, making its associate eligible again
+    // for the queued visitor - this is the "Second UP" case.
+    accept(state, v1, 5)
     expect(visitOf(state, v4).status).toBe('Assigned')
-    const offerForV4 = snap(state).assignments.find((asg) => asg.visitId === v4)
-    expect(offerForV4?.participantId).toBe(a)
-    expect(associateOf(state, a).activeTurns).toBe(1) // V1 still accepted, unfinished
-    expect(associateOf(state, a).pendingAssignmentId).toBe(offerForV4?.assignmentId)
+    const v4Assignment = snap(state).assignments.find((asg) => asg.visitId === v4)
+    expect(v4Assignment?.participantId).toBe(a)
+    expect(associateOf(state, a).activeTurns).toBe(1) // v1, accepted-unfinished
+    expect(associateOf(state, a).pendingAssignmentId).toBe(v4Assignment?.assignmentId)
 
     // No sale was ever completed in this whole sequence.
     expect(snap(state).metrics.closedSales).toBe(0)
   })
 
-  it('never offers a second visit while one offer is unresolved, even with other Available associates', () => {
-    const state = session()
-    arrive(state, 1, 'evt_1')
-    arrive(state, 2, 'evt_2')
-    arrive(state, 3, 'evt_3')
-
-    const board = snap(state)
-    expect(board.assignments).toHaveLength(1)
-    expect(board.visits.filter((v) => v.status === 'Waiting')).toHaveLength(2)
-    expect(hasPendingOffer(board)).toBe(true)
-  })
-
-  it('lets accepted, unfinished work coexist with a brand new offer to the same associate', () => {
+  it('offers a new arrival to a different, not-yet-offered associate while one offer is unresolved elsewhere', () => {
     const state = session()
     const v1 = arrive(state, 1, 'evt_1')
-    accept(state, v1, 2) // front-of-queue associate now has one accepted-unfinished turn
-    const sameAssociate = snap(state).assignments[0].participantId
+    const v2 = arrive(state, 2, 'evt_2')
 
-    // Two more arrive; the second one loops back to the same associate once
-    // the first is accepted, per the A -> B -> C -> A cycle on a 1-roster slice.
-    const v2 = arrive(state, 3, 'evt_2')
-    expect(associateOf(state, sameAssociate).activeTurns).toBe(1)
+    expect(visitOf(state, v1).status).toBe('Assigned')
     expect(visitOf(state, v2).status).toBe('Assigned')
+    const assignmentFor = (visitId: string) => snap(state).assignments.find((asg) => asg.visitId === visitId)
+    expect(assignmentFor(v1)?.participantId).not.toBe(assignmentFor(v2)?.participantId)
+  })
+
+  it('an associate with accepted-unfinished work can still take on new offers ("Second UP")', () => {
+    const state = session()
+    const v1 = arrive(state, 1, 'evt_1') // -> A
+    arrive(state, 2, 'evt_2') // -> B
+    arrive(state, 3, 'evt_3') // -> C
+    const a = snap(state).assignments.find((asg) => asg.visitId === v1)!.participantId
+
+    accept(state, v1, 4) // A is now accepted-unfinished, not pending
+    expect(associateOf(state, a).activeTurns).toBe(1)
+    expect(associateOf(state, a).pendingAssignmentId).toBeNull()
+
+    // A is the only eligible associate now (B, C each still hold their own
+    // pending offer), so a new arrival goes to A despite the unfinished work.
+    const v4 = arrive(state, 5, 'evt_4')
+    expect(visitOf(state, v4).status).toBe('Assigned')
+    const v4Assignment = snap(state).assignments.find((asg) => asg.visitId === v4)
+    expect(v4Assignment?.participantId).toBe(a)
+    expect(associateOf(state, a).activeTurns).toBe(1) // unchanged
   })
 })
 
 describe('US-04 registering a departure', () => {
-  it('lets a Waiting visitor (blocked behind the gate) leave with a result and zero assignments', () => {
+  it('lets a Waiting visitor (every associate already offered) leave with a result and zero assignments', () => {
     const state = session()
-    arrive(state, 1, 'evt_1') // takes the one offer
-    const waiting = arrive(state, 2, 'evt_2') // stays Waiting behind it
+    arrive(state, 1, 'evt_1') // -> A
+    arrive(state, 2, 'evt_2') // -> B
+    arrive(state, 3, 'evt_3') // -> C
+    const waiting = arrive(state, 4, 'evt_4') // everyone already has a pending offer
 
     expect(visitOf(state, waiting).status).toBe('Waiting')
     expect(visitOf(state, waiting).assignmentId).toBeNull()
@@ -327,7 +335,7 @@ describe('US-04 registering a departure', () => {
     expect(visit.status).toBe('Completed')
     expect(visit.outcome).toBe('NoSale')
     expect(visit.assignmentId).toBeNull()
-    expect(snap(state).metrics.assignedTurns).toBe(1)
+    expect(snap(state).metrics.assignedTurns).toBe(3)
   })
 
   it('requires an explicit result when none is recorded yet', () => {
@@ -338,28 +346,27 @@ describe('US-04 registering a departure', () => {
     ).toThrow(BoardError)
   })
 
-  it('closes a pending offer with reason Departure, clears the gate, and never consumes the turn or moves the queue', () => {
+  it('departing a pending offer frees that associate and offers the oldest Waiting visit next', () => {
     const state = session()
-    const visitId = arrive(state, 2)
-    const participantId = snap(state).associates[0].participantId
-    const assignmentId = assignmentIdOf(state, visitId)
-    const next = arrive(state, 3, 'evt_next') // stays Waiting behind the pending offer
+    const v1 = arrive(state, 1, 'evt_1') // -> A
+    arrive(state, 2, 'evt_2') // -> B
+    arrive(state, 3, 'evt_3') // -> C
+    const next = arrive(state, 4, 'evt_4') // Waiting: everyone already has a pending offer
 
-    engine.markDeparture(state, { sessionId: state.sessionId, visitId, outcome: 'NoSale' }, at(5))
+    const participantId = snap(state).assignments.find((asg) => asg.visitId === v1)!.participantId
+    const assignmentId = assignmentIdOf(state, v1)
+
+    engine.markDeparture(state, { sessionId: state.sessionId, visitId: v1, outcome: 'NoSale' }, at(5))
 
     const assignment = snap(state).assignments.find((a) => a.assignmentId === assignmentId)
     expect(assignment?.completionReason).toBe('Departure')
     expect(assignment?.acceptedAt).toBeNull()
-    // The turn is not consumed and the queue is not moved by this departure:
-    // the same associate is still front-of-queue, so the freshly cleared
-    // gate immediately offers them the next oldest Waiting visit.
-    const associate = associateOf(state, participantId)
-    expect(associate.state).toBe('Available')
-    expect(associate.queuePosition).toBe(1)
-    expect(associate.pendingAssignmentId).not.toBe(assignmentId)
-    expect(associate.pendingAssignmentId).not.toBeNull()
+    // The queue already moved when this offer was made, so departure moves
+    // nothing further - but clearing it does make the associate eligible
+    // again, and the only Waiting visit goes to them.
     expect(visitOf(state, next).status).toBe('Assigned')
-    expect(visitOf(state, next).assignmentId).toBe(associate.pendingAssignmentId)
+    const nextAssignment = snap(state).assignments.find((a) => a.visitId === next)
+    expect(nextAssignment?.participantId).toBe(participantId)
   })
 
   it('closes an accepted assignment with reason Departure while keeping acceptedAt and rotation unchanged', () => {
@@ -507,23 +514,24 @@ describe('US-05 availability', () => {
     expect(associateOf(state, second.participantId).queuePosition).toBe(3)
   })
 
-  it('assigns waiting visits in registration order as the gate clears', () => {
+  it('assigns waiting visits in registration order as associates become eligible again', () => {
     const state = session()
     const ids = [1, 2, 3, 4, 5].map((minute) => arrive(state, minute, `evt_${minute}`))
-    const [first, second, third, fourth, fifth] = ids
-    expect(visitOf(state, second).status).toBe('Waiting')
+    const [first, second, , fourth, fifth] = ids
+    // All three associates already hold their own offer after the first
+    // three arrivals, so the 4th and 5th wait.
     expect(visitOf(state, fourth).status).toBe('Waiting')
     expect(visitOf(state, fifth).status).toBe('Waiting')
 
-    accept(state, first, 6) // offers V2
-    accept(state, second, 7) // offers V3
-    accept(state, third, 8) // offers V4, oldest remaining - not V5
-
+    accept(state, first, 6) // frees that associate -> offers V4 (oldest Waiting)
     expect(visitOf(state, fourth).status).toBe('Assigned')
     expect(visitOf(state, fifth).status).toBe('Waiting')
+
+    accept(state, second, 7) // frees the next -> offers V5
+    expect(visitOf(state, fifth).status).toBe('Assigned')
   })
 
-  it('appends a returning participant to the bottom and only dispatches when no offer is pending', () => {
+  it('a returning associate joins at the bottom and can immediately take a Waiting visit', () => {
     const state = session()
     const target = snap(state).associates[0]
     engine.setAvailability(
@@ -533,20 +541,24 @@ describe('US-05 availability', () => {
     )
     expect(associateOf(state, target.participantId).queuePosition).toBeNull()
 
-    // A different pending offer exists; returning Available must not create a second one.
-    const visitId = arrive(state, 2, 'evt_pending')
+    // The remaining two each pick up their own offer, leaving nobody eligible.
+    arrive(state, 2, 'evt_b')
+    arrive(state, 3, 'evt_c')
+    const visitId = arrive(state, 4, 'evt_waiting')
+    expect(visitOf(state, visitId).status).toBe('Waiting')
+
     engine.setAvailability(
       state,
       { sessionId: state.sessionId, participantId: target.participantId, commandId: 'cmd_on', state: 'Available' },
-      at(3),
+      at(5),
     )
+
     // Dense rank among the 3 now-Available associates: the returning one
-    // joins at the bottom, rank 3 of 3 (confirmed against the live backend -
-    // OffFloor compacts the remaining ranks, a return re-expands them).
-    expect(associateOf(state, target.participantId).queuePosition).toBe(3)
-    expect(associateOf(state, target.participantId).pendingAssignmentId).toBeNull()
-    expect(snap(state).assignments).toHaveLength(1)
+    // joins at the bottom, rank 3 of 3, and is the only eligible associate.
     expect(visitOf(state, visitId).status).toBe('Assigned')
+    const assignment = snap(state).assignments.find((a) => a.visitId === visitId)
+    expect(assignment?.participantId).toBe(target.participantId)
+    expect(associateOf(state, target.participantId).pendingAssignmentId).toBe(assignment?.assignmentId)
   })
 
   it('treats a delayed replay of the original commandId as a no-op', () => {
