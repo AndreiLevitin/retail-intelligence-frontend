@@ -274,15 +274,28 @@ test "keeps the full history across repeated rejects" in
 4. A departure after a rejection closes only the live assignment; rejected
    history is untouched.
 
-**Not yet re-verified live** because `:3000` is down again (the same
-memory-reaping 503 as before - not a code issue; see Claude Code's own
-process-reaping notes if this keeps recurring). Once it's back with
-migration `20261028000200` applied, run the same curl-sweep pattern as the
-rotation-fix verification below, but for reject: offer → reject → confirm
-re-offer to a different associate when one is eligible, confirm fallback
-back to the same one when nobody else is, confirm 409 `INVALID_TRANSITION`
-on rejecting an already-accepted offer, confirm the history survives a
-reset-adjacent departure.
+**Re-verified live against `:3000` with migration `20261028000200` applied**,
+curl-sweep, same pattern as the rotation fix:
+
+* Rejecting with other associates untouched re-offered the visit to the
+  next eligible one in queue order, never back to the rejecter (tracked
+  exact participant ids through `assignedAt`/`completionReason`).
+* With all three simultaneously holding their own offer, rejecting one
+  re-offered the same visit right back to that same associate (nobody
+  else was eligible) - the exact fallback case, not assumed.
+* 409 `INVALID_TRANSITION` both ways: rejecting an already-accepted
+  assignment, and accepting an already-rejected one.
+* Re-rejecting an already-closed assignment replayed `true` with the
+  current Visit status (by then `Accepted`, since that visit's *second*
+  offer had since been accepted - confirming history and current state
+  are tracked independently, exactly per invariant 1 above).
+* CORS preflight for `/reject` from `localhost:5181`, 409 `STALE_SESSION`
+  on a well-formed-but-stale `sessionId`, and 404 `NOT_FOUND` on an
+  unknown assignment id all matched the established error shapes.
+
+Demo reset to clean afterward; `.env.local` stayed on `http` throughout
+(nothing to revert - `/reject` just stopped 404ing once the backend
+deployed it).
 
 **Verified end-to-end against the per-associate rotation fix (contract
 v3)**, locally, after the backend's second migration pass
