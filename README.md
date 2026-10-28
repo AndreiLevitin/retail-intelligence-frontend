@@ -254,14 +254,35 @@ plus a render smoke check of the app tree.
 
 ## Remaining API integration work
 
-**`POST /api/assignments/{id}/reject` is new on the frontend and not yet
-implemented on the backend.** Reject UP's button is live in the UI and the
-mock engine, but calling it against the real backend currently 404s
-`NOT_FOUND` (confirmed directly: a clean 404, handled gracefully as a
-short, non-retryable error - not a crash). The backend needs the mirror
-of `/accept` at `/reject`; see the corrected `Assignment Rotation
-Revision.md`'s "Reject UP" section and `Backend Requirements.md` §6 for
-the exact request/response shape and transition rules.
+**Backend has implemented `POST /api/assignments/{id}/reject` (contract
+v4, `20261028000200_reject_up.sql`), matching this frontend's design
+exactly** - confirmed by re-deriving the same four invariants independently
+and checking them against `mockEngine.ts` (see the permanent regression
+test "keeps the full history across repeated rejects" in
+`mockEngine.test.ts`), rather than taking either side's word for it:
+
+1. A visit can carry any number of `Rejected` assignments plus at most one
+   other (pending/accepted/completed-via-outcome). `BoardSnapshot.assignments`
+   lists all of them; `VisitView.assignmentId` always resolves to the live
+   (non-rejected) one and is `null` while `Waiting`.
+2. `assignedTurns` counts rejected offers; `acceptedTurns` does not.
+3. The rejecting associate is immediately eligible again (still `Available`,
+   no pending offer, queue position untouched), so in practice `Waiting`
+   never actually comes back from a reject - it is normally re-offered at
+   once, to someone else if one is eligible and ahead in queue, or straight
+   back to the same associate otherwise.
+4. A departure after a rejection closes only the live assignment; rejected
+   history is untouched.
+
+**Not yet re-verified live** because `:3000` is down again (the same
+memory-reaping 503 as before - not a code issue; see Claude Code's own
+process-reaping notes if this keeps recurring). Once it's back with
+migration `20261028000200` applied, run the same curl-sweep pattern as the
+rotation-fix verification below, but for reject: offer → reject → confirm
+re-offer to a different associate when one is eligible, confirm fallback
+back to the same one when nobody else is, confirm 409 `INVALID_TRANSITION`
+on rejecting an already-accepted offer, confirm the history survives a
+reset-adjacent departure.
 
 **Verified end-to-end against the per-associate rotation fix (contract
 v3)**, locally, after the backend's second migration pass

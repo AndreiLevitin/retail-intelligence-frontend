@@ -354,6 +354,36 @@ describe('US-03 rejecting an offer', () => {
     expect(visitOf(state, v4).status).toBe('Waiting')
     expect(visitOf(state, v4).waitingPosition).toBe(1)
   })
+  it('keeps the full history across repeated rejects; assignmentId always points at the live one', () => {
+    // Confirmed against the backend's own implementation: a visit may carry
+    // any number of Rejected assignments plus at most one other - the DTO
+    // must always resolve to the live (non-rejected) one, never a past one.
+    const state = session()
+    const visitId = arrive(state, 1)
+
+    const a1 = assignmentIdOf(state, visitId)
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId: a1 }, at(2))
+
+    const a2 = assignmentIdOf(state, visitId)
+    expect(a2).not.toBe(a1)
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId: a2 }, at(3))
+
+    const a3 = assignmentIdOf(state, visitId)
+    expect(a3).not.toBe(a1)
+    expect(a3).not.toBe(a2)
+
+    const board = snap(state)
+    const visit = board.visits.find((v) => v.visitId === visitId)!
+    expect(visit.assignmentId).toBe(a3)
+    expect(visit.status).toBe('Assigned')
+
+    const own = board.assignments.filter((a) => a.visitId === visitId)
+    expect(own).toHaveLength(3)
+    expect(own.filter((a) => a.completionReason === 'Rejected')).toHaveLength(2)
+    expect(own.find((a) => a.assignmentId === a3)?.phase).toBe('PendingAcceptance')
+    expect(board.metrics.assignedTurns).toBe(3)
+    expect(board.metrics.acceptedTurns).toBe(0)
+  })
 })
 
 describe('US-05 rotation: at most one unresolved offer per associate', () => {
