@@ -8,8 +8,8 @@
  *
  * Command shapes mirror the backend's public contract exactly: only arrival
  * and availability carry a client idempotency key (`eventId` / `commandId`);
- * accept, outcome, departure and attributes do not, because the backend's
- * own current-state check makes a blind retry of those safe.
+ * accept, reject, outcome, departure and attributes do not, because the
+ * backend's own current-state check makes a blind retry of those safe.
  */
 import type { AvailabilityState, BoardSnapshot, Outcome, VisitorAttributes } from '../lib/types.ts'
 
@@ -33,6 +33,11 @@ export interface UpdateAttributesCommand extends SessionScoped {
 
 /** POST /api/assignments/{assignmentId}/accept */
 export interface AcceptAssignmentCommand extends SessionScoped {
+  assignmentId: string
+}
+
+/** POST /api/assignments/{assignmentId}/reject - same shape as accept. */
+export interface RejectAssignmentCommand extends SessionScoped {
   assignmentId: string
 }
 
@@ -66,6 +71,7 @@ export interface BoardService {
   registerVisitor(command: RegisterVisitorCommand): Promise<void>
   updateAttributes(command: UpdateAttributesCommand): Promise<void>
   acceptAssignment(command: AcceptAssignmentCommand): Promise<void>
+  rejectAssignment(command: RejectAssignmentCommand): Promise<void>
   recordOutcome(command: RecordOutcomeCommand): Promise<void>
   markDeparture(command: MarkDepartureCommand): Promise<void>
   setAvailability(command: SetAvailabilityCommand): Promise<void>

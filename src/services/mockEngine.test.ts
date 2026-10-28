@@ -243,6 +243,119 @@ describe('US-03 accepting and completing a turn', () => {
   })
 })
 
+describe('US-03 rejecting an offer', () => {
+  it('closes the rejected assignment with reason Rejected and does not move the rejecting associate\'s queue', () => {
+    const state = session()
+    const visitId = arrive(state, 2)
+    const participantId = snap(state).associates[0].participantId
+    const assignmentId = assignmentIdOf(state, visitId)
+
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId }, at(4))
+
+    const assignment = snap(state).assignments.find((a) => a.assignmentId === assignmentId)
+    expect(assignment?.completionReason).toBe('Rejected')
+    expect(assignment?.acceptedAt).toBeNull()
+    // Rejecting itself does not move this associate - the immediate re-offer
+    // to a *different* associate afterward is what reshuffles the dense
+    // rank around it; that is covered by the dedicated queue-rank tests.
+    expect(associateOf(state, participantId).pendingAssignmentId).toBeNull()
+
+    // The other two associates were never touched and rank ahead of the
+    // one who just rejected, so the visit is immediately re-offered to one
+    // of them instead - never the stale closed assignment leaking through.
+    const visit = visitOf(state, visitId)
+    expect(visit.status).toBe('Assigned')
+    expect(visit.assignmentId).not.toBe(assignmentId)
+    const newAssignment = snap(state).assignments.find((a) => a.assignmentId === visit.assignmentId)
+    expect(newAssignment?.participantId).not.toBe(participantId)
+  })
+
+  it('immediately re-offers the rejected visit to a different eligible associate', () => {
+    const state = session()
+    const v1 = arrive(state, 1, 'evt_1') // -> A
+    const assignmentId = assignmentIdOf(state, v1)
+    const a = snap(state).assignments[0].participantId
+
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId }, at(2))
+
+    const visit = visitOf(state, v1)
+    expect(visit.status).toBe('Assigned')
+    expect(visit.assignmentId).not.toBeNull()
+    const newAssignment = snap(state).assignments.find((asg) => asg.assignmentId === visit.assignmentId)
+    expect(newAssignment?.participantId).not.toBe(a) // offered to B, not back to A
+  })
+
+  it('counts a rejected offer toward assignedTurns but never acceptedTurns', () => {
+    const state = session()
+    const v1 = arrive(state, 1, 'evt_1')
+    const assignmentId = assignmentIdOf(state, v1)
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId }, at(2))
+
+    // The reject triggered a re-offer (assignedTurns 2: the rejected one
+    // plus the new one), and nothing has been accepted.
+    expect(snap(state).metrics.assignedTurns).toBe(2)
+    expect(snap(state).metrics.acceptedTurns).toBe(0)
+  })
+
+  it('rejects an already-accepted assignment and is a no-op replay on an already-closed one', () => {
+    const state = session()
+    const v1 = arrive(state, 1, 'evt_1')
+    const assignmentId = assignmentIdOf(state, v1)
+    accept(state, v1, 2)
+
+    expect(() =>
+      engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId }, at(3)),
+    ).toThrow(BoardError)
+
+    const v2 = arrive(state, 4, 'evt_2')
+    const secondAssignmentId = assignmentIdOf(state, v2)
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId: secondAssignmentId }, at(5))
+    const closedAt = snap(state).assignments.find((a) => a.assignmentId === secondAssignmentId)?.completedAt
+    // Replaying the same reject is a no-op, not a second effect.
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId: secondAssignmentId }, at(6))
+    expect(snap(state).assignments.find((a) => a.assignmentId === secondAssignmentId)?.completedAt).toBe(closedAt)
+  })
+
+  it('re-offers right back to the same associate when nobody else is eligible either', () => {
+    const state = session()
+    const v1 = arrive(state, 1, 'evt_1') // -> A
+    const v2 = arrive(state, 2, 'evt_2') // -> B
+    const v3 = arrive(state, 3, 'evt_3') // -> C
+    const a = snap(state).assignments[0].participantId
+    const assignmentId = assignmentIdOf(state, v1)
+
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId }, at(4))
+
+    // B and C each still hold their own pending offer; rejecting clears A's
+    // own, making A the only eligible associate - v1 (still the oldest
+    // Waiting visit by registration order) goes right back to A.
+    const visit = visitOf(state, v1)
+    expect(visit.status).toBe('Assigned')
+    expect(visit.assignmentId).not.toBe(assignmentId) // a fresh assignment, not the rejected one
+    const newAssignment = snap(state).assignments.find((asg) => asg.assignmentId === visit.assignmentId)
+    expect(newAssignment?.participantId).toBe(a)
+    expect(visitOf(state, v2).status).toBe('Assigned')
+    expect(visitOf(state, v3).status).toBe('Assigned')
+  })
+
+  it('a later arrival stays Waiting behind the rejected visit, which keeps FIFO priority by its original order', () => {
+    const state = session()
+    const v1 = arrive(state, 1, 'evt_1') // -> A
+    arrive(state, 2, 'evt_2') // -> B
+    arrive(state, 3, 'evt_3') // -> C
+    const v4 = arrive(state, 4, 'evt_4') // Waiting: everyone already offered
+    const assignmentId = assignmentIdOf(state, v1)
+
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId }, at(5))
+
+    // v1 keeps its original (oldest) registration order, so it - not v4 -
+    // wins the only freed slot, exactly as fairness requires.
+    expect(visitOf(state, v1).status).toBe('Assigned')
+    expect(visitOf(state, v4).status).toBe('Waiting')
+    expect(visitOf(state, v4).waitingPosition).toBe(1)
+  })
+})
+
 describe('US-05 rotation: at most one unresolved offer per associate', () => {
   it('offers three simultaneous arrivals to three different associates - no session-wide gate', () => {
     const state = session()

@@ -153,6 +153,38 @@ to A, B and C **in parallel** (not queued behind each other), and the
 fourth cycles back to whichever of them accepts first — all without ever
 completing a sale.
 
+### Reject UP
+
+If Accept exists, Reject must too — the real store process confirms
+associates can decline a UP (BR-06), and the frontend was missing it until
+the user flagged it. Reject sits next to Accept UP in the Visitors table
+wherever a visit is `Assigned` and not yet accepted (`canRejectUp` has the
+identical precondition to `canAcceptUp`).
+
+* Closes the assignment with `completionReason: "Rejected"` — the same
+  shape as a pending-offer departure (no `acceptedAt`), except the Visit
+  returns to **`Waiting`** instead of `Completed`: the visitor is still
+  here and still needs service. Its original `arrivedAt` and registration
+  order are untouched, so it keeps FIFO priority over any newer arrival
+  that was already Waiting.
+* Rejecting never moves the rejecting associate's queue itself — that
+  already happened at offer time, same as Accept — but it does clear
+  their `pendingAssignmentId`, making them eligible again. The dispatch
+  this triggers can genuinely re-offer the very same visit right back to
+  that same associate if nobody else happens to be eligible at that
+  moment (confirmed in `mockEngine.test.ts` — this is the same emergent
+  behaviour a pending-offer departure already has, not a bug).
+* `VisitView.assignmentId` is `null` whenever `status` is `Waiting`. This
+  was always true before Reject existed (a Waiting visit never had any
+  assignment history), but Reject introduces the first path *back* to
+  Waiting from `Assigned`, so a visit can now carry closed/rejected
+  history while Waiting — `toVisitView` special-cases this so a stale
+  assignment id never makes a Waiting row look assigned.
+* Rejecting an already-accepted assignment is rejected itself
+  (409 `INVALID_TRANSITION`); rejecting an already-closed one is a replay
+  no-op. A rejected offer counts toward `assignedTurns` (it was a created
+  offer) but never `acceptedTurns`.
+
 ### Separate state, never inferred
 
 Visit status, physical presence and purchase outcome are three independent
@@ -181,9 +213,10 @@ until the new board has loaded.
 ## Mock scenarios
 
 `MockBoardClient` wraps `mockEngine.ts`, which implements the same
-advance-on-acceptance transitions the backend owns — FIFO registration, the
-one-pending-offer-per-session gate, release to the bottom of rotation only on
-acceptance, idempotent commands, rejected conflicts. Mock behaviour exists
+per-associate-offer transitions the backend owns — FIFO registration, the
+queue moving at offer time rather than accept time, each associate's own
+one-pending-offer limit (not a session-wide gate), Reject re-offering
+immediately, idempotent commands, rejected conflicts. Mock behaviour exists
 only there, not spread through components.
 
 Roster: Avery Collins, Jordan Reyes, Morgan Patel — Available in that order.
@@ -193,11 +226,12 @@ Switch scenarios from the mock-mode panel at the top of the dashboard:
 | Scenario | What it shows |
 |---|---|
 | Empty run | Seeded session, no visits, zero counts and 0% conversion |
-| Pending turn | Visit Assigned, the one offer is Pending Acceptance, Accept UP offered |
+| Pending turn | Visit Assigned, the offer is Pending Acceptance, Accept UP and Reject both offered |
+| Rejected, re-offered | The first associate rejected; the visit was immediately re-offered to the next eligible associate instead of sitting idle |
 | Accepted turn | Visit Accepted; the associate stays Available and keeps its new queue position - accepting never makes it ineligible |
 | Completed but Inside | Sale recorded, turn Completed, presence still Inside, rotation unaffected |
-| Awaiting confirmation | Three visitors arrive; only the first is offered - the other two stay Waiting *even though every other associate is Available*, purely because of the single-offer gate |
-| Departed without assignment | A Waiting visitor (blocked behind the gate) left with No-Sale and zero assignments |
+| Awaiting confirmation | Each associate may hold at most one unconfirmed offer; the first three visitors take all three **in parallel**, and a fourth has nobody eligible and waits |
+| Departed without assignment | A Waiting visitor (every associate already holding their own offer) left with No-Sale and zero assignments |
 | Departed after completion | Exit after a Sale: result preserved read-only, rotation untouched |
 | Temporary API failure | First two reads fail, then the board recovers |
 
@@ -210,7 +244,7 @@ offline state and recovery. **Reset Demo** works in every scenario.
 |---|---|
 | US-01 Open the board | Seeded session, deterministic order, Next UP, metrics, 2 s poll, loading/empty/failure/reconnect states — `useBoard`, `DashboardPage`, `AssociatesTable` |
 | US-02 Register manually | `VisitorForm` create mode, `eventId` idempotency, server-set `arrivedAt`/order, Manual + NotRequested, profile-only correction via edit mode |
-| US-03 Accept and complete | `Accept UP` for a pending assignment only; `Sale` / `No-Sale` for an accepted unfinished turn; release to rotation bottom; Completed stays Inside |
+| US-03 Accept, reject and complete | `Accept UP` and `Reject UP` side by side for a pending assignment only; `Sale` / `No-Sale` for an accepted unfinished turn; Reject returns the Visit to Waiting at its original order and re-dispatches; Completed stays Inside |
 | US-04 Register departure | `ExitDialog`: requires a missing result, preserves an existing one read-only; Waiting visitors can leave unassigned |
 | US-05 Availability and waiting | `AssociatesTable` Off Floor blocked only for the pending-offer owner, bottom-of-queue return, the two-reason Waiting explanation, the one-offer gate itself |
 | US-06 Reset | `ResetDialog` destructive confirmation, mutations blocked, old snapshots discarded, new board loads at zero |
@@ -219,6 +253,15 @@ offline state and recovery. **Reset Demo** works in every scenario.
 plus a render smoke check of the app tree.
 
 ## Remaining API integration work
+
+**`POST /api/assignments/{id}/reject` is new on the frontend and not yet
+implemented on the backend.** Reject UP's button is live in the UI and the
+mock engine, but calling it against the real backend currently 404s
+`NOT_FOUND` (confirmed directly: a clean 404, handled gracefully as a
+short, non-retryable error - not a crash). The backend needs the mirror
+of `/accept` at `/reject`; see the corrected `Assignment Rotation
+Revision.md`'s "Reject UP" section and `Backend Requirements.md` §6 for
+the exact request/response shape and transition rules.
 
 **Verified end-to-end against the per-associate rotation fix (contract
 v3)**, locally, after the backend's second migration pass

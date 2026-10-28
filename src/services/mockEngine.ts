@@ -19,12 +19,15 @@
  *  - departure of a still-pending offer clears it (reason Departure)
  *    without any further queue effect - the position already moved at
  *    offer time and nothing moves it back
+ *  - rejecting a still-pending offer closes it (reason Rejected) the same
+ *    way, except the Visit returns to Waiting (not Completed) at its
+ *    original registration order, and a dispatch is attempted immediately
  *
  * The rules live here and not in components, so they exist in exactly one
  * place and can be deleted together with the mock adapter. Only arrival
  * (`eventId`) and availability (`commandId`) carry a client idempotency key,
- * matching the backend contract; accept, outcome, departure and attributes
- * are made safe to retry by checking current state instead.
+ * matching the backend contract; accept, reject, outcome, departure and
+ * attributes are made safe to retry by checking current state instead.
  *
  * Every mutation takes an explicit `at` timestamp, which keeps the seeded
  * review scenarios deterministic.
@@ -362,8 +365,9 @@ export function acceptAssignment(
   // Already accepted: a blind retry reports replayed, no further effect.
   if (assignment.acceptedAt !== null) return
   if (assignment.completedAt !== null) {
-    // Closed by an early departure before acceptance: never fabricate one.
-    throw new BoardError('Conflict', 'That offer was already closed by a departure.', {
+    // Closed by an early departure or a reject before acceptance: never
+    // fabricate one.
+    throw new BoardError('Conflict', 'That offer was already closed.', {
       retryable: false,
       apiCode: 'INVALID_TRANSITION',
     })
@@ -392,6 +396,55 @@ export function acceptAssignment(
     assignmentId: assignment.assignmentId,
   })
 
+  tryCreateOffer(state, at)
+}
+
+/**
+ * Rejects a still-pending offer. If Accept exists, Reject must too (the
+ * real store process confirms associates can decline a UP). Unlike a
+ * departure, the visitor is still here - the Visit returns to Waiting at
+ * its original registration order (never a fictitious new arrival), and a
+ * dispatch is attempted immediately so it may go straight to a different
+ * eligible associate.
+ */
+export function rejectAssignment(
+  state: MockState,
+  input: { sessionId: string; assignmentId: string },
+  at: string,
+): void {
+  requireSession(state, input.sessionId)
+  const assignment = findAssignment(state, input.assignmentId)
+
+  if (assignment.acceptedAt !== null) {
+    // An accepted turn cannot be rejected - never undo a confirmed acceptance.
+    throw new BoardError('Conflict', 'That offer was already accepted.', {
+      retryable: false,
+      apiCode: 'INVALID_TRANSITION',
+    })
+  }
+  // Already closed (rejected, or departed before acceptance): a blind
+  // retry reports replayed, no further effect.
+  if (assignment.completedAt !== null) return
+
+  const visit = findVisit(state, assignment.visitId)
+  const participant = findParticipant(state, assignment.participantId)
+
+  assignment.completedAt = at
+  assignment.completionReason = 'Rejected'
+  // Back to Waiting, not Completed - the visitor is still here and still
+  // needs service. Registration order is untouched, so FIFO fairness holds.
+  visit.status = 'Waiting'
+  // The rejecting associate's queue position is untouched - it already
+  // moved to the back when this offer was created, same as Accept.
+
+  logAt(state, at, 'AssignmentRejected', `${participant.displayName} rejected the UP.`, {
+    visitId: visit.visitId,
+    participantId: participant.participantId,
+    assignmentId: assignment.assignmentId,
+  })
+
+  // May re-offer this same visit to a different eligible associate right
+  // away, or leave it Waiting if nobody else is eligible.
   tryCreateOffer(state, at)
 }
 
@@ -566,7 +619,11 @@ function waitingPositionOf(state: MockState, visit: MockVisit): number | null {
 }
 
 function toVisitView(state: MockState, visit: MockVisit): VisitView {
-  const assignment = latestAssignmentOfVisit(state, visit.visitId)
+  // Waiting always means "no assignment currently connects to this visit" -
+  // true by construction before Reject existed, but Reject introduces the
+  // first path back to Waiting from Assigned, so a visit can now carry
+  // closed/rejected history while Waiting. Never let that leak through.
+  const assignment = visit.status === 'Waiting' ? undefined : latestAssignmentOfVisit(state, visit.visitId)
   return {
     visitId: visit.visitId,
     arrivedAt: visit.arrivedAt,

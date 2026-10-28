@@ -6,13 +6,21 @@
  * on acceptance" rotation rule. `Reset Demo` is an action available in every
  * scenario rather than a scenario of its own.
  */
-import { acceptAssignment, createSession, markDeparture, recordOutcome, registerVisitor } from './mockEngine.ts'
+import {
+  acceptAssignment,
+  createSession,
+  markDeparture,
+  recordOutcome,
+  registerVisitor,
+  rejectAssignment,
+} from './mockEngine.ts'
 import type { MockState } from './mockEngine.ts'
 import type { VisitorAttributes } from '../lib/types.ts'
 
 export type ScenarioId =
   | 'empty'
   | 'pending'
+  | 'rejected-reoffered'
   | 'accepted'
   | 'completed-inside'
   | 'awaiting-confirmation'
@@ -115,6 +123,18 @@ export const MOCK_SCENARIOS: MockScenario[] = [
     build: (base) => {
       const state = freshSession(base)
       arrive(state, attributes.puffer, at(base, 4))
+      return state
+    },
+  },
+  {
+    id: 'rejected-reoffered',
+    label: 'Rejected, re-offered',
+    description:
+      'The first associate rejected their offer; it was immediately re-offered to the next eligible associate instead of sitting idle. The activity log shows UP rejected followed by a new UP assigned.',
+    build: (base) => {
+      const state = freshSession(base)
+      const visitId = arrive(state, attributes.puffer, at(base, 2))
+      rejectAssignment(state, { sessionId: state.sessionId, assignmentId: openAssignmentId(state, visitId) }, at(base, 4))
       return state
     },
   },

@@ -162,6 +162,10 @@ export function DashboardPage() {
           if (row.visit.assignmentId === null) return
           void board.acceptUp(row.visit.visitId, row.visit.assignmentId)
         }}
+        onReject={(row) => {
+          if (row.visit.assignmentId === null) return
+          void board.rejectUp(row.visit.visitId, row.visit.assignmentId)
+        }}
         onRecordOutcome={(row, outcome) => {
           if (row.visit.assignmentId === null) return
           void board.recordOutcome(row.visit.visitId, row.visit.assignmentId, outcome)

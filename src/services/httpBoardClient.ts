@@ -24,6 +24,7 @@ import type {
   MarkDepartureCommand,
   RecordOutcomeCommand,
   RegisterVisitorCommand,
+  RejectAssignmentCommand,
   ResetDemoCommand,
   SetAvailabilityCommand,
   UpdateAttributesCommand,
@@ -35,6 +36,7 @@ export const BOARD_ROUTES = {
   arrivals: '/api/arrivals',
   attributes: (visitId: string) => `/api/visits/${encodeURIComponent(visitId)}/attributes`,
   accept: (assignmentId: string) => `/api/assignments/${encodeURIComponent(assignmentId)}/accept`,
+  reject: (assignmentId: string) => `/api/assignments/${encodeURIComponent(assignmentId)}/reject`,
   outcome: (assignmentId: string) => `/api/assignments/${encodeURIComponent(assignmentId)}/outcome`,
   departure: (visitId: string) => `/api/visits/${encodeURIComponent(visitId)}/departure`,
   availability: '/api/availability',
@@ -99,6 +101,10 @@ export class HttpBoardClient implements BoardService {
 
   async acceptAssignment(command: AcceptAssignmentCommand): Promise<void> {
     await this.request('POST', BOARD_ROUTES.accept(command.assignmentId), { sessionId: command.sessionId })
+  }
+
+  async rejectAssignment(command: RejectAssignmentCommand): Promise<void> {
+    await this.request('POST', BOARD_ROUTES.reject(command.assignmentId), { sessionId: command.sessionId })
   }
 
   async recordOutcome(command: RecordOutcomeCommand): Promise<void> {

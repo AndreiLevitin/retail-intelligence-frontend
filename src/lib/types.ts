@@ -10,12 +10,13 @@
  * than imported; if the backend contract changes, update this file to match
  * and do not drift the public shape unilaterally from the frontend side.
  *
- * Reflects "Assignment Rotation Revision - Advance on Acceptance": an
- * associate's own availability is only Available/OffFloor - accepted,
- * unfinished work no longer makes them ineligible, and at most one
- * unresolved pending offer exists across the whole session (not one
- * unfinished assignment per participant). The backend had not yet applied
- * this migration as of this change; see README for the coordination note.
+ * Reflects the corrected "Assignment Rotation Revision - Per-Associate
+ * Offers": an associate's own availability is only Available/OffFloor -
+ * accepted, unfinished work never makes them ineligible - and each
+ * associate may hold at most one unconfirmed offer of their own at a time
+ * (not a session-wide gate; different associates can each hold their own
+ * offer in parallel). Confirmed end-to-end against the live backend
+ * (contract v3); see README for the verification note.
  */
 
 /* ------------------------------------------------------------ enum values */
@@ -27,7 +28,7 @@ export type AvailabilityState = (typeof AvailabilityStates)[number]
 export const AssignmentPhases = ['PendingAcceptance', 'Accepted', 'Completed'] as const
 export type AssignmentPhase = (typeof AssignmentPhases)[number]
 
-export const CompletionReasons = ['OutcomeRecorded', 'Departure'] as const
+export const CompletionReasons = ['OutcomeRecorded', 'Departure', 'Rejected'] as const
 export type CompletionReason = (typeof CompletionReasons)[number]
 
 export const Outcomes = ['Sale', 'NoSale'] as const
@@ -58,6 +59,7 @@ export const ActivityKinds = [
   'ArrivalRecorded',
   'AssignmentCreated',
   'AssignmentAccepted',
+  'AssignmentRejected',
   'TurnCompleted',
   'AvailabilityChanged',
   'VisitorAttributesUpdated',
@@ -83,7 +85,7 @@ export interface AssociateView {
   state: AvailabilityState
   /** 1-based rank among Available participants; null unless Available. */
   queuePosition: number | null
-  /** The session's single unresolved offer, if this associate holds it. */
+  /** This associate's own unresolved offer, if any - independent of other associates'. */
   pendingAssignmentId: string | null
   /** Accepted, unfinished assignments - any number of these is valid. */
   activeAssignmentIds: string[]
@@ -120,6 +122,12 @@ export interface VisitView {
   outcomeRecordedAt: string | null
   /** 1-based FIFO rank among Waiting visitors still inside; otherwise null. */
   waitingPosition: number | null
+  /**
+   * Null whenever status is `Waiting` - including after a Reject, which
+   * returns a visit to Waiting but leaves a closed assignment in its
+   * history. Never let a stale id leak through and make a Waiting row
+   * look assigned.
+   */
   assignmentId: string | null
 }
 
@@ -186,6 +194,11 @@ export function nextUpParticipantId(associates: readonly AssociateView[]): strin
 /** Accept UP is only offered for a pending assignment of a visitor still inside. */
 export function canAcceptUp(visit: VisitView): boolean {
   return visit.status === 'Assigned' && visit.departedAt === null && visit.assignmentId !== null
+}
+
+/** Reject UP has the identical precondition to Accept UP - they are offered side by side. */
+export function canRejectUp(visit: VisitView): boolean {
+  return canAcceptUp(visit)
 }
 
 /** Sale / No-Sale is only offered for an accepted, unfinished turn. */

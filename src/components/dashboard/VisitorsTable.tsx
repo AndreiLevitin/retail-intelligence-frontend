@@ -16,7 +16,7 @@ import {
   visitStatusLabels,
   visitStatusTones,
 } from '../../lib/labels.ts'
-import { canAcceptUp, canMarkExit, canRecordOutcome, presenceOf } from '../../lib/types.ts'
+import { canAcceptUp, canMarkExit, canRecordOutcome, canRejectUp, presenceOf } from '../../lib/types.ts'
 import type { VisitRow } from '../../lib/selectors.ts'
 import type { Outcome, VisitStatus } from '../../lib/types.ts'
 import { actionKeys } from '../../hooks/useBoard.ts'
@@ -48,6 +48,7 @@ interface VisitorsTableProps {
   /** Why a Waiting visit has no assignment right now. */
   waitingExplanation: string | null
   onAccept: (row: VisitRow) => void
+  onReject: (row: VisitRow) => void
   onRecordOutcome: (row: VisitRow, outcome: Outcome) => void
   onMarkExit: (row: VisitRow) => void
   onEditAttributes: (row: VisitRow) => void
@@ -68,6 +69,7 @@ export function VisitorsTable({
   isPending,
   waitingExplanation,
   onAccept,
+  onReject,
   onRecordOutcome,
   onMarkExit,
   onEditAttributes,
@@ -191,6 +193,18 @@ export function VisitorsTable({
               </Button>
             ) : null}
 
+            {canRejectUp(row.visit) ? (
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={mutationsBlocked}
+                pending={isPending(actionKeys.reject(row.visit.visitId))}
+                onClick={() => onReject(row)}
+              >
+                Reject
+              </Button>
+            ) : null}
+
             {canRecordOutcome(row.visit) ? (
               <>
                 <Button
@@ -239,7 +253,7 @@ export function VisitorsTable({
         ),
       },
     ],
-    [isPending, mutationsBlocked, onAccept, onEditAttributes, onMarkExit, onRecordOutcome, waitingExplanation],
+    [isPending, mutationsBlocked, onAccept, onEditAttributes, onMarkExit, onReject, onRecordOutcome, waitingExplanation],
   )
 
   const filtered = filteredRows.length !== rows.length

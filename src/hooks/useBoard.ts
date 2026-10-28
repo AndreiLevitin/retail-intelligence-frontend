@@ -28,6 +28,7 @@ export const actionKeys = {
   reset: 'reset-demo',
   editAttributes: (visitId: string) => `visit:${visitId}:attributes`,
   accept: (visitId: string) => `visit:${visitId}:accept`,
+  reject: (visitId: string) => `visit:${visitId}:reject`,
   outcome: (visitId: string) => `visit:${visitId}:outcome`,
   departure: (visitId: string) => `visit:${visitId}:departure`,
   availability: (participantId: string) => `participant:${participantId}:availability`,
@@ -43,6 +44,7 @@ export interface BoardActions {
   addVisitor(attributes: VisitorAttributes): Promise<boolean>
   editAttributes(visitId: string, attributes: VisitorAttributes): Promise<boolean>
   acceptUp(visitId: string, assignmentId: string): Promise<boolean>
+  rejectUp(visitId: string, assignmentId: string): Promise<boolean>
   recordOutcome(visitId: string, assignmentId: string, outcome: Outcome): Promise<boolean>
   markDeparture(visitId: string, outcome: Outcome | null): Promise<boolean>
   setAvailability(participantId: string, state: AvailabilityState): Promise<boolean>
@@ -209,6 +211,12 @@ export function useBoard(service: BoardService): UseBoardResult {
         const sessionId = guard()
         if (sessionId === null) return false
         return runCommand(actionKeys.accept(visitId), () => service.acceptAssignment({ sessionId, assignmentId }))
+      },
+
+      async rejectUp(visitId, assignmentId) {
+        const sessionId = guard()
+        if (sessionId === null) return false
+        return runCommand(actionKeys.reject(visitId), () => service.rejectAssignment({ sessionId, assignmentId }))
       },
 
       async recordOutcome(visitId, assignmentId, outcome) {

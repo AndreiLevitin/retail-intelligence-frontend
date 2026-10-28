@@ -94,6 +94,7 @@ export const activityKindLabels: Record<ActivityKind, string> = {
   ArrivalRecorded: 'Visitor registered',
   AssignmentCreated: 'UP assigned',
   AssignmentAccepted: 'UP accepted',
+  AssignmentRejected: 'UP rejected',
   TurnCompleted: 'Outcome recorded',
   AvailabilityChanged: 'Availability changed',
   VisitorAttributesUpdated: 'Attributes updated',

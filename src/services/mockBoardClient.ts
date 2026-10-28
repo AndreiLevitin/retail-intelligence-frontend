@@ -10,6 +10,7 @@ import type {
   MarkDepartureCommand,
   RecordOutcomeCommand,
   RegisterVisitorCommand,
+  RejectAssignmentCommand,
   ResetDemoCommand,
   SetAvailabilityCommand,
   UpdateAttributesCommand,
@@ -97,6 +98,10 @@ export class MockBoardClient implements BoardService, MockBoardController {
 
   async acceptAssignment(command: AcceptAssignmentCommand): Promise<void> {
     await this.write(() => engine.acceptAssignment(this.state, command, this.now()))
+  }
+
+  async rejectAssignment(command: RejectAssignmentCommand): Promise<void> {
+    await this.write(() => engine.rejectAssignment(this.state, command, this.now()))
   }
 
   async recordOutcome(command: RecordOutcomeCommand): Promise<void> {
