@@ -1,0 +1,84 @@
+@import 'tailwindcss';
+
+/*
+ * Single definition of the visual tokens from UI Design System.md.
+ * Components reference these tokens; they do not repeat raw hex values.
+ */
+@theme {
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+
+  /* Text scale */
+  --text-label: 0.75rem; /* 12px - field + table labels */
+  --text-label--line-height: 1rem;
+  --text-body: 0.875rem; /* 14px - body + table cells */
+  --text-body--line-height: 1.25rem;
+  --text-section: 1.125rem; /* 18px - section titles */
+  --text-section--line-height: 1.5rem;
+  --text-page: 1.5rem; /* 24px - page title */
+  --text-page--line-height: 2rem;
+  --text-metric: 1.5rem; /* 24px - metric values */
+  --text-metric--line-height: 2rem;
+
+  /* Surfaces and text */
+  --color-page: #f8fafc;
+  --color-surface: #ffffff;
+  --color-ink: #0f172a;
+  --color-muted: #475569;
+  --color-line: #e2e8f0;
+
+  /* Primary action + focus */
+  --color-primary: #1d4ed8;
+  --color-primary-hover: #1a43b8;
+  --color-primary-ink: #ffffff;
+
+  /* Semantic status text with light tinted backgrounds */
+  --color-success: #166534;
+  --color-success-tint: #dcfce7;
+  --color-warning: #92400e;
+  --color-warning-tint: #fef3c7;
+  --color-danger: #b91c1c;
+  --color-danger-tint: #fee2e2;
+  --color-info: #1d4ed8;
+  --color-info-tint: #dbeafe;
+  --color-neutral-tint: #f1f5f9;
+
+  /* Radius: 6px controls, 8px panels and dialogs */
+  --radius-control: 6px;
+  --radius-panel: 8px;
+
+  /* Sizing rules */
+  --spacing-control: 40px; /* control height */
+  --spacing-touch: 44px; /* tablet touch target */
+  --spacing-row: 48px; /* minimum table row height */
+  --spacing-sidebar: 224px;
+}
+
+@layer base {
+  html {
+    font-size: 16px;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-page);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: var(--text-body);
+    line-height: var(--text-body--line-height);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Visible focus outline on every interactive element (design system rule). */
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    border-radius: var(--radius-control);
+  }
+}
+
+@utility panel {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-panel);
+}
