@@ -208,41 +208,31 @@ plus a render smoke check of the app tree.
 
 ## Remaining API integration work
 
-**Current status: the backend had not yet applied [Assignment Rotation
-Revision](../Assignment%20Rotation%20Revision.md) as of this frontend change**
-(confirmed by reading its `src/contracts/dto.ts`, which still has
-`PendingAcceptance`/`OnUP` as associate states and a singular
-`currentAssignmentId`). This frontend has moved to the *new* contract
-(`AvailabilityState`-only associate state, `pendingAssignmentId` /
-`activeAssignmentIds` / `activeTurns`, the one-pending-offer-per-session
-rule). **`VITE_BOARD_CLIENT` is pinned to `mock` in `.env.local` until the
-backend migrates** — do not flip it to `http` before that, or the UI will
-read the old shape as if it were the new one. An earlier pass of this file
-did verify all 8 endpoints end-to-end against a live (pre-revision) backend;
-that verification is now stale and must be redone once the migration lands.
+**Verified end-to-end against the migrated (contract v2) backend**, locally:
+every one of the 8 endpoints, the A → B → C → A acceptance cycle (no sale
+completed, each associate offered in turn), a pending-offer departure
+clearing the gate without moving the queue or consuming the turn, Off Floor
+succeeding for accepted-unfinished work but 409-rejected for the
+pending-offer owner, CORS preflight + an allowed-origin GET + a disallowed
+origin's 403 `ORIGIN_NOT_ALLOWED`, and 404/405/400 shapes. The demo was reset
+to a clean run afterward. What is still open before a real deployment:
 
-1. **Wait for the backend's rotation migration**, then re-point
-   `VITE_BOARD_CLIENT=http` and `VITE_API_BASE_URL` (or
-   `VITE_API_PROXY_TARGET` for the dev proxy) at it.
-2. **Re-verify all 8 endpoints end-to-end**, same as before, plus
-   specifically: the A → B → C → A acceptance cycle, a second arrival
-   staying Waiting while every other associate is Available, Off Floor
-   succeeding with accepted-unfinished work but failing for the pending-offer
-   owner, and a pending-offer departure clearing the gate without moving the
-   queue.
-3. **Re-run the story checks against the real path** — normal flow,
-   Waiting/Off Floor, retries and concurrency, all departure states, a sale
-   without an assignment, and reset with stale writes — the same scenarios
-   `npm test` already covers against the mock engine.
-4. **Confirm CORS and hosting.** Frontend and backend are independent
-   deployments now (`API_BASE_URL`, not same-origin `/api`); confirm the
-   backend's CORS allowlist actually includes this frontend's origin and
-   handles `OPTIONS` for `GET/POST/PATCH` with `Authorization`/
-   `Content-Type`.
-5. **Watch for further contract drift.** If the backend's contract changes
-   again, update `src/lib/types.ts`, `src/lib/labels.ts`,
-   `src/lib/selectors.ts`, `mockEngine.ts` and `httpBoardClient.ts` together;
-   they currently agree field-for-field with the *post-revision* contract,
+1. **`VITE_API_BASE_URL` / CORS allowlist for the actual deployed origins**,
+   not just `localhost:5173/5181`. The backend's `CORS_ALLOWED_ORIGINS` needs
+   every real frontend origin added.
+2. **Confirm auth for the deployed environment.** The operator token is sent
+   as `Authorization: Bearer <token>`; confirm the real header name and
+   whether a token is required at all outside local dev.
+3. **Re-run the full story checks against the real path** end to end —
+   normal flow, Waiting/Off Floor, retries and concurrency, all departure
+   states, a sale without an assignment, and reset with stale writes — once
+   deployed, the same scenarios `npm test` already covers against the mock
+   engine.
+4. **Watch for further contract drift** (backend is on
+   `src/contracts/dto.ts`'s `CONTRACT_VERSION = 2`; bump this note if that
+   changes again). If it does, update `src/lib/types.ts`,
+   `src/lib/labels.ts`, `src/lib/selectors.ts`, `mockEngine.ts` and
+   `httpBoardClient.ts` together; they currently agree field-for-field,
    including:
    * routes — `POST /api/arrivals`, `PATCH /api/visits/{id}/attributes`,
      `POST /api/assignments/{id}/accept`, `POST /api/assignments/{id}/outcome`
@@ -262,11 +252,17 @@ that verification is now stale and must be redone once the migration lands.
    * `AssociateView.state` is `Available | OffFloor` only; `pendingAssignmentId`
      (nullable), `activeAssignmentIds` (array) and `activeTurns` replace the
      old singular `currentAssignmentId`
-   * error bodies are `{code, message}`; `BoardError.fromApi` maps every code
-     in `Backend Requirements.md` §6
-6. **Confirm auth.** The operator token is sent as
-   `Authorization: Bearer <token>`; confirm the real header name and whether
-   a token is required at all in the deployed environment.
+   * **`queuePosition` is a dense 1-based rank among currently-Available
+     associates, recomputed on every read - not a raw stored ordering
+     token.** Confirmed directly against the live backend (marking an
+     associate Off Floor compacts the remaining ranks; returning re-expands
+     them at the bottom). `mockEngine.ts` got this wrong on the first pass
+     (it exposed an ever-growing counter) until this was caught by this very
+     verification sweep - see `queueRanks()` and the dedicated test "`queuePosition`
+     is a dense 1..N rank..." in `mockEngine.test.ts`.
+   * error bodies are `{code, message}`, including `ORIGIN_NOT_ALLOWED` (403,
+     disallowed browser `Origin`); `BoardError.fromApi` maps every code in
+     `Backend Requirements.md` §6
 
 ## Deliberately not built
 

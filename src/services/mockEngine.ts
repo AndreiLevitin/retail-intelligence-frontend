@@ -54,7 +54,15 @@ interface MockParticipant {
   associateId: string
   displayName: string
   state: AvailabilityState
-  queuePosition: number | null
+  /**
+   * Raw, ever-increasing ordering token; null when OffFloor. The DTO does
+   * NOT expose this directly - `queuePosition` on the wire is a dense
+   * 1-based rank among currently-Available associates, recomputed at
+   * snapshot time (confirmed against the live backend: marking one
+   * associate OffFloor compacts the remaining ranks, and a returning
+   * associate reappears at the new bottom rank, not at a raw token value).
+   */
+  queueOrder: number | null
   /** Created offers, including ones later closed by early departure. */
   assignedTurns: number
   acceptedTurns: number
@@ -94,7 +102,7 @@ export interface MockState {
   eventIdToVisitId: Map<string, string>
   /** Dedupe ledger for replayed availability commands. */
   seenAvailabilityCommandIds: Set<string>
-  nextQueuePosition: number
+  nextQueueOrder: number
   counters: Record<string, number>
 }
 
@@ -136,7 +144,7 @@ export function createSession(sessionId: string, startedAt: string): MockState {
     activity: [],
     eventIdToVisitId: new Map(),
     seenAvailabilityCommandIds: new Set(),
-    nextQueuePosition: 1,
+    nextQueueOrder: 1,
     counters: {},
   }
 
@@ -147,7 +155,7 @@ export function createSession(sessionId: string, startedAt: string): MockState {
       associateId: associate.associateId,
       displayName: associate.displayName,
       state: 'Available',
-      queuePosition: state.nextQueuePosition++,
+      queueOrder: state.nextQueueOrder++,
       assignedTurns: 0,
       acceptedTurns: 0,
     })
@@ -214,14 +222,24 @@ function latestAssignmentOfVisit(state: MockState, visitId: string): MockAssignm
 
 function eligibleParticipants(state: MockState): MockParticipant[] {
   return state.participants
-    .filter((p) => p.state === 'Available' && p.queuePosition !== null)
-    .sort((a, b) => (a.queuePosition ?? 0) - (b.queuePosition ?? 0))
+    .filter((p) => p.state === 'Available' && p.queueOrder !== null)
+    .sort((a, b) => (a.queueOrder ?? 0) - (b.queueOrder ?? 0))
 }
 
 /** Appends a returning or just-accepted participant to the bottom of rotation. */
 function appendToQueue(state: MockState, participant: MockParticipant): void {
   participant.state = 'Available'
-  participant.queuePosition = state.nextQueuePosition++
+  participant.queueOrder = state.nextQueueOrder++
+}
+
+/**
+ * Dense 1-based rank among currently-Available associates, by their raw
+ * ordering token. This is what `AssociateView.queuePosition` exposes - the
+ * raw token itself only matters for relative order, never on the wire.
+ */
+function queueRanks(state: MockState): Map<string, number> {
+  const ranked = eligibleParticipants(state)
+  return new Map(ranked.map((participant, index) => [participant.participantId, index + 1]))
 }
 
 /**
@@ -493,7 +511,7 @@ export function setAvailability(
       })
     }
     participant.state = 'OffFloor'
-    participant.queuePosition = null
+    participant.queueOrder = null
   } else {
     appendToQueue(state, participant)
   }
@@ -573,7 +591,7 @@ function toAssignmentView(assignment: MockAssignment): AssignmentView {
   }
 }
 
-function toAssociateView(state: MockState, participant: MockParticipant): AssociateView {
+function toAssociateView(state: MockState, participant: MockParticipant, rank: number | null): AssociateView {
   const own = state.assignments.filter((a) => a.participantId === participant.participantId)
   const pending = own.find((a) => a.acceptedAt === null && a.completedAt === null)
   const active = own.filter((a) => a.acceptedAt !== null && a.completedAt === null)
@@ -582,7 +600,7 @@ function toAssociateView(state: MockState, participant: MockParticipant): Associ
     associateId: participant.associateId,
     displayName: participant.displayName,
     state: participant.state,
-    queuePosition: participant.queuePosition,
+    queuePosition: rank,
     pendingAssignmentId: pending?.assignmentId ?? null,
     activeAssignmentIds: active.map((a) => a.assignmentId),
     activeTurns: active.length,
@@ -592,9 +610,12 @@ function toAssociateView(state: MockState, participant: MockParticipant): Associ
 }
 
 export function toSnapshot(state: MockState, serverTime: string): BoardSnapshot {
+  const ranks = queueRanks(state)
   return {
     session: { sessionId: state.sessionId, startedAt: state.startedAt },
-    associates: state.participants.map((participant) => toAssociateView(state, participant)),
+    associates: state.participants.map((participant) =>
+      toAssociateView(state, participant, ranks.get(participant.participantId) ?? null),
+    ),
     visits: [...state.visits]
       .sort((a, b) => a.registrationOrder - b.registrationOrder)
       .map((visit) => toVisitView(state, visit)),

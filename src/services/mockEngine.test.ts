@@ -159,8 +159,11 @@ describe('US-03 accepting and completing a turn', () => {
     expect(accepted.pendingAssignmentId).toBeNull()
     expect(accepted.activeTurns).toBe(1)
     expect(accepted.acceptedTurns).toBe(1)
-    // Moved to the bottom, behind the two untouched participants.
-    expect(accepted.queuePosition).toBe(4)
+    // Moved to the bottom: queuePosition is a dense 1..N rank among
+    // Available associates (confirmed against the live backend), so the
+    // just-accepted participant becomes rank 3 of 3, not a raw ever-growing
+    // token value.
+    expect(accepted.queuePosition).toBe(3)
   })
 
   it('completes the turn without touching rotation or availability; visitor stays Inside', () => {
@@ -258,17 +261,19 @@ describe('US-05 rotation: at most one unresolved offer per session', () => {
     expect(visitOf(state, v4).status).toBe('Waiting')
 
     accept(state, v1, 5) // A accepts -> offer V2 to B
-    expect(associateOf(state, a).queuePosition).toBe(4)
+    // Dense rank, not a raw token: the just-accepted associate is always
+    // rank 3 of 3 (confirmed against the live backend).
+    expect(associateOf(state, a).queuePosition).toBe(3)
     expect(visitOf(state, v2).status).toBe('Assigned')
     expect(associateOf(state, b).pendingAssignmentId).not.toBeNull()
 
     accept(state, v2, 6) // B accepts -> offer V3 to C
-    expect(associateOf(state, b).queuePosition).toBe(5)
+    expect(associateOf(state, b).queuePosition).toBe(3)
     expect(visitOf(state, v3).status).toBe('Assigned')
     expect(associateOf(state, c).pendingAssignmentId).not.toBeNull()
 
     accept(state, v3, 7) // C accepts -> offer V4 to A, even though A's V1 is still unfinished
-    expect(associateOf(state, c).queuePosition).toBe(6)
+    expect(associateOf(state, c).queuePosition).toBe(3)
     expect(visitOf(state, v4).status).toBe('Assigned')
     const offerForV4 = snap(state).assignments.find((asg) => asg.visitId === v4)
     expect(offerForV4?.participantId).toBe(a)
@@ -473,6 +478,35 @@ describe('US-05 availability', () => {
     expect(assignment?.participantId).toBe(returning.participantId)
   })
 
+  it('queuePosition is a dense 1..N rank among Available associates, not a raw token', () => {
+    // Confirmed directly against the live (migrated) backend: OffFloor
+    // compacts the remaining ranks rather than leaving a gap, and a
+    // returning associate re-expands them at the bottom.
+    const state = session()
+    const [first, second, third] = snap(state).associates
+    expect(snap(state).associates.map((a) => a.queuePosition)).toEqual([1, 2, 3])
+
+    engine.setAvailability(
+      state,
+      { sessionId: state.sessionId, participantId: second.participantId, commandId: 'cmd_off', state: 'OffFloor' },
+      at(1),
+    )
+    // The middle associate leaves; the one behind them compacts up to rank 2.
+    expect(associateOf(state, first.participantId).queuePosition).toBe(1)
+    expect(associateOf(state, second.participantId).queuePosition).toBeNull()
+    expect(associateOf(state, third.participantId).queuePosition).toBe(2)
+
+    engine.setAvailability(
+      state,
+      { sessionId: state.sessionId, participantId: second.participantId, commandId: 'cmd_on', state: 'Available' },
+      at(2),
+    )
+    // Returns at the bottom of the now-3-wide rank, not at their old rank.
+    expect(associateOf(state, first.participantId).queuePosition).toBe(1)
+    expect(associateOf(state, third.participantId).queuePosition).toBe(2)
+    expect(associateOf(state, second.participantId).queuePosition).toBe(3)
+  })
+
   it('assigns waiting visits in registration order as the gate clears', () => {
     const state = session()
     const ids = [1, 2, 3, 4, 5].map((minute) => arrive(state, minute, `evt_${minute}`))
@@ -506,9 +540,10 @@ describe('US-05 availability', () => {
       { sessionId: state.sessionId, participantId: target.participantId, commandId: 'cmd_on', state: 'Available' },
       at(3),
     )
-    // Queue tokens only increase - position 3 is still held by the
-    // associate who never left, so the returning one joins at 4.
-    expect(associateOf(state, target.participantId).queuePosition).toBe(4)
+    // Dense rank among the 3 now-Available associates: the returning one
+    // joins at the bottom, rank 3 of 3 (confirmed against the live backend -
+    // OffFloor compacts the remaining ranks, a return re-expands them).
+    expect(associateOf(state, target.participantId).queuePosition).toBe(3)
     expect(associateOf(state, target.participantId).pendingAssignmentId).toBeNull()
     expect(snap(state).assignments).toHaveLength(1)
     expect(visitOf(state, visitId).status).toBe('Assigned')

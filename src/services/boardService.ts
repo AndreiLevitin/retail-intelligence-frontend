@@ -77,6 +77,8 @@ export type ApiErrorCode =
   | 'VALIDATION_ERROR'
   | 'OUTCOME_REQUIRED'
   | 'UNAUTHORIZED'
+  /** Browser request from an origin outside the backend's CORS allowlist. */
+  | 'ORIGIN_NOT_ALLOWED'
   | 'NOT_FOUND'
   | 'METHOD_NOT_ALLOWED'
   | 'STALE_SESSION'
@@ -101,6 +103,8 @@ const API_CODE_TO_BOARD_ERROR: Record<ApiErrorCode, { code: BoardErrorCode; retr
   VALIDATION_ERROR: { code: 'Conflict', retryable: false },
   OUTCOME_REQUIRED: { code: 'Conflict', retryable: false },
   UNAUTHORIZED: { code: 'Unauthorized', retryable: false },
+  // Misconfiguration (wrong VITE_API_BASE_URL/origin), not an operator action.
+  ORIGIN_NOT_ALLOWED: { code: 'Unauthorized', retryable: false },
   NOT_FOUND: { code: 'Conflict', retryable: false },
   METHOD_NOT_ALLOWED: { code: 'Unknown', retryable: false },
   STALE_SESSION: { code: 'Conflict', retryable: false },
