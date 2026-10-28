@@ -316,29 +316,51 @@ describe('US-03 rejecting an offer', () => {
     expect(snap(state).assignments.find((a) => a.assignmentId === secondAssignmentId)?.completedAt).toBe(closedAt)
   })
 
-  it('re-offers right back to the same associate when nobody else is eligible either', () => {
+  it('stays Waiting - never back to the same associate - when nobody else is eligible either', () => {
+    // Confirmed with the user: looping the same offer back to the associate
+    // who just rejected it is not acceptable UX. When they are the only
+    // technically-eligible one, the visit is treated exactly as if it had
+    // just arrived while everyone was busy - it waits for someone else.
     const state = session()
     const v1 = arrive(state, 1, 'evt_1') // -> A
     const v2 = arrive(state, 2, 'evt_2') // -> B
     const v3 = arrive(state, 3, 'evt_3') // -> C
-    const a = snap(state).assignments[0].participantId
     const assignmentId = assignmentIdOf(state, v1)
 
     engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId }, at(4))
 
-    // B and C each still hold their own pending offer; rejecting clears A's
-    // own, making A the only eligible associate - v1 (still the oldest
-    // Waiting visit by registration order) goes right back to A.
     const visit = visitOf(state, v1)
-    expect(visit.status).toBe('Assigned')
-    expect(visit.assignmentId).not.toBe(assignmentId) // a fresh assignment, not the rejected one
-    const newAssignment = snap(state).assignments.find((asg) => asg.assignmentId === visit.assignmentId)
-    expect(newAssignment?.participantId).toBe(a)
+    expect(visit.status).toBe('Waiting')
+    expect(visit.assignmentId).toBeNull() // never leaks the rejected assignment
+    expect(visit.waitingPosition).toBe(1)
+    // B and C are completely unaffected by A's rejection.
     expect(visitOf(state, v2).status).toBe('Assigned')
     expect(visitOf(state, v3).status).toBe('Assigned')
   })
 
-  it('a later arrival stays Waiting behind the rejected visit, which keeps FIFO priority by its original order', () => {
+  it('a later dispatch trigger can still offer the rejected visit to the same associate, once eligible through a separate event', () => {
+    const state = session()
+    const v1 = arrive(state, 1, 'evt_1') // -> A
+    const v2 = arrive(state, 2, 'evt_2') // -> B
+    arrive(state, 3, 'evt_3') // -> C
+    const a = snap(state).assignments[0].participantId
+    const assignmentId = assignmentIdOf(state, v1)
+
+    engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId }, at(4))
+    expect(visitOf(state, v1).status).toBe('Waiting') // the one-shot exclusion applies here
+
+    // B's own, unrelated acceptance is a separate dispatch trigger - A (now
+    // long past the moment of their own reject) is a completely normal
+    // candidate again, and is in fact the only one eligible.
+    accept(state, v2, 5)
+
+    const visit = visitOf(state, v1)
+    expect(visit.status).toBe('Assigned')
+    const newAssignment = snap(state).assignments.find((asg) => asg.assignmentId === visit.assignmentId)
+    expect(newAssignment?.participantId).toBe(a)
+  })
+
+  it('a later arrival also stays Waiting behind the rejected visit, which keeps FIFO priority by its original order', () => {
     const state = session()
     const v1 = arrive(state, 1, 'evt_1') // -> A
     arrive(state, 2, 'evt_2') // -> B
@@ -348,11 +370,13 @@ describe('US-03 rejecting an offer', () => {
 
     engine.rejectAssignment(state, { sessionId: state.sessionId, assignmentId }, at(5))
 
-    // v1 keeps its original (oldest) registration order, so it - not v4 -
-    // wins the only freed slot, exactly as fairness requires.
-    expect(visitOf(state, v1).status).toBe('Assigned')
+    // Nobody is eligible for v1 (A excluded, B/C still pending), so it
+    // stays Waiting - at its original, oldest registration order, ahead
+    // of v4 whenever a slot does open up.
+    expect(visitOf(state, v1).status).toBe('Waiting')
+    expect(visitOf(state, v1).waitingPosition).toBe(1)
     expect(visitOf(state, v4).status).toBe('Waiting')
-    expect(visitOf(state, v4).waitingPosition).toBe(1)
+    expect(visitOf(state, v4).waitingPosition).toBe(2)
   })
   it('keeps the full history across repeated rejects; assignmentId always points at the live one', () => {
     // Confirmed against the backend's own implementation: a visit may carry

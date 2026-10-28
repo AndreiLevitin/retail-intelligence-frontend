@@ -22,6 +22,9 @@
  *  - rejecting a still-pending offer closes it (reason Rejected) the same
  *    way, except the Visit returns to Waiting (not Completed) at its
  *    original registration order, and a dispatch is attempted immediately
+ *    - but never back to the associate who just rejected: if nobody *else*
+ *      is eligible, the visit stays Waiting, exactly as if it had arrived
+ *      while everyone was busy, rather than looping back to the same person
  *
  * The rules live here and not in components, so they exist in exactly one
  * place and can be deleted together with the mock adapter. Only arrival
@@ -231,11 +234,19 @@ function latestAssignmentOfVisit(state: MockState, visitId: string): MockAssignm
 
 /**
  * Available AND not already holding their own unconfirmed offer. Accepted,
- * unfinished work does not exclude a participant.
+ * unfinished work does not exclude a participant. `excludeParticipantId` is
+ * a one-shot exclusion for the single dispatch attempt right after a
+ * reject - see `tryCreateOffer`.
  */
-function eligibleParticipants(state: MockState): MockParticipant[] {
+function eligibleParticipants(state: MockState, excludeParticipantId?: string): MockParticipant[] {
   return state.participants
-    .filter((p) => p.state === 'Available' && p.queueOrder !== null && pendingOfferOf(state, p.participantId) === undefined)
+    .filter(
+      (p) =>
+        p.state === 'Available' &&
+        p.queueOrder !== null &&
+        p.participantId !== excludeParticipantId &&
+        pendingOfferOf(state, p.participantId) === undefined,
+    )
     .sort((a, b) => (a.queueOrder ?? 0) - (b.queueOrder ?? 0))
 }
 
@@ -266,14 +277,23 @@ function queueRanks(state: MockState): Map<string, number> {
  * reserves that participant and moves them to the back of the queue right
  * away, optimistically assuming they will confirm - Accept does not move
  * the queue again. Returns true when an offer was created.
+ *
+ * `excludeParticipantId`: the one dispatch attempt that runs immediately
+ * after a Reject must not hand the same visit right back to the associate
+ * who just declined it - confirmed with the user: when nobody *else* is
+ * eligible, the visit should stay Waiting, exactly as if it had arrived at
+ * a moment when everyone was busy, not loop back to the same person. This
+ * is a one-shot exclusion for this single call, not a lasting block - any
+ * later dispatch (a new arrival, someone else's accept/reject/departure,
+ * an availability change) considers that associate normally again.
  */
-function tryCreateOffer(state: MockState, at: string): boolean {
+function tryCreateOffer(state: MockState, at: string, excludeParticipantId?: string): boolean {
   const visit = state.visits
     .filter((v) => v.status === 'Waiting' && v.departedAt === null)
     .sort((a, b) => a.registrationOrder - b.registrationOrder)[0]
   if (visit === undefined) return false
 
-  const participant = eligibleParticipants(state)[0]
+  const participant = eligibleParticipants(state, excludeParticipantId)[0]
   if (participant === undefined) return false
 
   const assignment: MockAssignment = {
@@ -443,9 +463,10 @@ export function rejectAssignment(
     assignmentId: assignment.assignmentId,
   })
 
-  // May re-offer this same visit to a different eligible associate right
-  // away, or leave it Waiting if nobody else is eligible.
-  tryCreateOffer(state, at)
+  // Offers to a different eligible associate right away; never back to the
+  // one who just rejected. If nobody else is eligible, the visit stays
+  // Waiting - exactly as if it had just arrived while everyone was busy.
+  tryCreateOffer(state, at, participant.participantId)
 }
 
 export function recordOutcome(

@@ -169,11 +169,19 @@ identical precondition to `canAcceptUp`).
   that was already Waiting.
 * Rejecting never moves the rejecting associate's queue itself — that
   already happened at offer time, same as Accept — but it does clear
-  their `pendingAssignmentId`, making them eligible again. The dispatch
-  this triggers can genuinely re-offer the very same visit right back to
-  that same associate if nobody else happens to be eligible at that
-  moment (confirmed in `mockEngine.test.ts` — this is the same emergent
-  behaviour a pending-offer departure already has, not a bug).
+  their `pendingAssignmentId`, making them eligible again. **Correction,
+  same day:** the one dispatch this triggers excludes the rejecting
+  associate for that single attempt. If someone *else* is eligible, the
+  visit is re-offered to them right away; if the rejecter was the only
+  technically-eligible one, the visit stays `Waiting` — treated exactly as
+  if it had arrived at a moment when everyone was busy, never looped
+  straight back to the person who just declined it. This was flagged by
+  the user as bad UX after the first version shipped (which, like a
+  pending-offer departure, *did* hand it right back) and is now a
+  one-shot exclusion in `tryCreateOffer`'s `excludeParticipantId`, not a
+  lasting block — any later, separately-triggered dispatch (a new
+  arrival, someone else's accept/reject/departure, an availability
+  change) considers that associate normally again.
 * `VisitView.assignmentId` is `null` whenever `status` is `Waiting`. This
   was always true before Reject existed (a Waiting visit never had any
   assignment history), but Reject introduces the first path *back* to
@@ -244,7 +252,7 @@ offline state and recovery. **Reset Demo** works in every scenario.
 |---|---|
 | US-01 Open the board | Seeded session, deterministic order, Next UP, metrics, 2 s poll, loading/empty/failure/reconnect states — `useBoard`, `DashboardPage`, `AssociatesTable` |
 | US-02 Register manually | `VisitorForm` create mode, `eventId` idempotency, server-set `arrivedAt`/order, Manual + NotRequested, profile-only correction via edit mode |
-| US-03 Accept, reject and complete | `Accept UP` and `Reject UP` side by side for a pending assignment only; `Sale` / `No-Sale` for an accepted unfinished turn; Reject returns the Visit to Waiting at its original order and re-dispatches; Completed stays Inside |
+| US-03 Accept, reject and complete | `Accept UP` and `Reject UP` side by side for a pending assignment only; `Sale` / `No-Sale` for an accepted unfinished turn; Reject returns the Visit to Waiting at its original order and re-dispatches excluding the rejecter (never loops back to them); Completed stays Inside |
 | US-04 Register departure | `ExitDialog`: requires a missing result, preserves an existing one read-only; Waiting visitors can leave unassigned |
 | US-05 Availability and waiting | `AssociatesTable` Off Floor blocked only for the pending-offer owner, bottom-of-queue return, the two-reason Waiting explanation, the one-offer gate itself |
 | US-06 Reset | `ResetDialog` destructive confirmation, mutations blocked, old snapshots discarded, new board loads at zero |
@@ -254,44 +262,46 @@ plus a render smoke check of the app tree.
 
 ## Remaining API integration work
 
-**Backend has implemented `POST /api/assignments/{id}/reject` (contract
-v4, `20261028000200_reject_up.sql`), matching this frontend's design
-exactly** - confirmed by re-deriving the same four invariants independently
-and checking them against `mockEngine.ts` (see the permanent regression
-test "keeps the full history across repeated rejects" in
-`mockEngine.test.ts`), rather than taking either side's word for it:
+**Reject UP's dispatch fallback was corrected again after going live - the
+sweep below is now stale for one specific case and needs redoing once the
+backend applies the same fix.** `POST /api/assignments/{id}/reject`
+(contract v4, `20261028000200_reject_up.sql`) matched this frontend's
+design and was verified live, including the exact case the user then
+flagged as bad UX: when the rejecting associate was the only
+technically-eligible one, the dispatch handed the same visit right back to
+them. The user asked for the visit to stay `Waiting` instead (treated as a
+fresh arrival while everyone was busy) - see `tryCreateOffer`'s
+`excludeParticipantId` and the corrected `Assignment Rotation
+Revision.md` rule 11. Of the four invariants confirmed below, only #3
+changed:
 
 1. A visit can carry any number of `Rejected` assignments plus at most one
    other (pending/accepted/completed-via-outcome). `BoardSnapshot.assignments`
    lists all of them; `VisitView.assignmentId` always resolves to the live
-   (non-rejected) one and is `null` while `Waiting`.
+   (non-rejected) one and is `null` while `Waiting`. **Unaffected.**
 2. `assignedTurns` counts rejected offers; `acceptedTurns` does not.
-3. The rejecting associate is immediately eligible again (still `Available`,
-   no pending offer, queue position untouched), so in practice `Waiting`
-   never actually comes back from a reject - it is normally re-offered at
-   once, to someone else if one is eligible and ahead in queue, or straight
-   back to the same associate otherwise.
+   **Unaffected.**
+3. ~~The rejecting associate is immediately eligible again... re-offered
+   right back to the same associate~~ **superseded:** the immediate
+   dispatch excludes the rejecter for that one attempt. If someone else is
+   eligible, re-offer proceeds as before; if the rejecter was the only
+   one, the visit now stays `Waiting` instead.
 4. A departure after a rejection closes only the live assignment; rejected
-   history is untouched.
+   history is untouched. **Unaffected.**
 
-**Re-verified live against `:3000` with migration `20261028000200` applied**,
-curl-sweep, same pattern as the rotation fix:
-
-* Rejecting with other associates untouched re-offered the visit to the
-  next eligible one in queue order, never back to the rejecter (tracked
-  exact participant ids through `assignedAt`/`completionReason`).
-* With all three simultaneously holding their own offer, rejecting one
-  re-offered the same visit right back to that same associate (nobody
-  else was eligible) - the exact fallback case, not assumed.
-* 409 `INVALID_TRANSITION` both ways: rejecting an already-accepted
-  assignment, and accepting an already-rejected one.
-* Re-rejecting an already-closed assignment replayed `true` with the
-  current Visit status (by then `Accepted`, since that visit's *second*
-  offer had since been accepted - confirming history and current state
-  are tracked independently, exactly per invariant 1 above).
-* CORS preflight for `/reject` from `localhost:5181`, 409 `STALE_SESSION`
-  on a well-formed-but-stale `sessionId`, and 404 `NOT_FOUND` on an
-  unknown assignment id all matched the established error shapes.
+**Verified live before this correction** (needs re-running case 2 below
+once the backend has the matching fix): `POST .../reject` with other
+associates untouched correctly re-offered to the next eligible one in
+queue order (unaffected by this correction, still valid); 409
+`INVALID_TRANSITION` both ways (rejecting an already-accepted assignment,
+accepting an already-rejected one, both unaffected); a replay on an
+already-closed assignment returned the Visit's current status
+(unaffected); CORS preflight, stale-session and not-found shapes on
+`/reject` (unaffected). **Case 2 - all three simultaneously holding their
+own offer, then one rejects - was verified against the *old* fallback
+behavior** (it came back `Assigned` to the same associate) and must be
+re-verified to confirm it now stays `Waiting` instead, once the backend
+ships the matching change.
 
 Demo reset to clean afterward; `.env.local` stayed on `http` throughout
 (nothing to revert - `/reject` just stopped 404ing once the backend
