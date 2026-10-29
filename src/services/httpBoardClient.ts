@@ -76,6 +76,11 @@ export class HttpBoardClient implements BoardService {
     return this.token !== null
   }
 
+  /** Local CV runner uses the same in-memory operator credential; never persisted. */
+  getToken(): string | null {
+    return this.token
+  }
+
   getBoard(options?: { signal?: AbortSignal }): Promise<BoardSnapshot> {
     return this.request<BoardSnapshot>('GET', BOARD_ROUTES.board, undefined, options?.signal)
   }

@@ -1,12 +1,13 @@
 import { cn } from '../../lib/cn.ts'
 
 /**
- * Only Dashboard is implemented. The remaining entries are visibly marked
+ * Dashboard and the explicitly requested local Video demo are implemented. Other entries are marked
  * Coming soon and are not links - there is no destination and no fake
  * navigation behind them.
  */
 const NAV_ITEMS = [
   { label: 'Dashboard', available: true },
+  { label: 'Video demo', available: true },
   { label: 'Analytics', available: false },
   { label: 'Company', available: false },
   { label: 'Support', available: false },
@@ -16,9 +17,11 @@ interface SidebarProps {
   /** Tablet drawer state. Ignored on desktop where the rail is static. */
   open: boolean
   onClose: () => void
+  page: 'Dashboard' | 'Video demo'
+  onNavigate: (page: 'Dashboard' | 'Video demo') => void
 }
 
-export function Sidebar({ open, onClose }: SidebarProps) {
+export function Sidebar({ open, onClose, page, onNavigate }: SidebarProps) {
   return (
     <>
       {open ? (
@@ -42,12 +45,14 @@ export function Sidebar({ open, onClose }: SidebarProps) {
           {NAV_ITEMS.map((item) =>
             item.available ? (
               <li key={item.label}>
-                <span
-                  aria-current="page"
-                  className="flex min-h-touch items-center rounded-control bg-info-tint px-3 text-body font-semibold text-primary lg:min-h-10"
+                <button
+                  type="button"
+                  onClick={() => { onNavigate(item.label); onClose() }}
+                  aria-current={page === item.label ? 'page' : undefined}
+                  className={cn('flex w-full min-h-touch items-center rounded-control px-3 text-body font-semibold lg:min-h-10', page === item.label ? 'bg-info-tint text-primary' : 'text-ink hover:bg-neutral-tint')}
                 >
                   {item.label}
-                </span>
+                </button>
               </li>
             ) : (
               <li key={item.label}>

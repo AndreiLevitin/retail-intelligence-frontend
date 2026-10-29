@@ -7,6 +7,11 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {
+      '/cv-demo': {
+        target: 'http://127.0.0.1:8765',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/cv-demo/, ''),
+      },
       // Same-origin /api paths in the browser; forwarded to the separate
       // backend during local development (VITE_API_PROXY_TARGET).
       '/api': {

@@ -8,13 +8,13 @@ import { TopBar } from './TopBar.tsx'
  * workspace. On tablet the sidebar collapses into a drawer and the workspace
  * takes the full width.
  */
-export function AppShell({ children }: { children: ReactNode }) {
+export function AppShell({ children, page, onNavigate }: { children: ReactNode; page: 'Dashboard' | 'Video demo'; onNavigate: (page: 'Dashboard' | 'Video demo') => void }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
   return (
     <div className="min-h-screen bg-page">
       <div className="flex">
-        <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+        <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} page={page} onNavigate={onNavigate} />
         <div className="flex min-w-0 flex-1 flex-col">
           <TopBar sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen((open) => !open)} />
           <main className="min-w-0 flex-1 p-4 lg:p-6">{children}</main>

@@ -1,9 +1,10 @@
 # Digital UP Board — frontend prototype
 
-Stage 1 operational dashboard for a retail receptionist. One responsive page
-that shows the current demo session, registers visitors manually, drives UP
-assignment/acceptance, records purchase outcomes and departures, manages
-associate availability and resets the demonstration.
+Stage1 operational dashboard plus the explicitly requested local Video demo.
+The board registers visitors manually or from CV, drives UP assignment/acceptance,
+records outcomes/departures, manages availability and resets the demonstration.
+See [Demo Runbook](../Demo%20Runbook.md). Current local verification uses backend
+3001 and the loopback CV runner8765. Production CV routing is not deployed.
 
 Scope is stories **US-01 … US-06** of [Prototype Backlog](../Prototype%20Backlog.md),
 built to [Frontend and UI Requirements](../Frontend%20and%20UI%20Requirements.md)
@@ -420,6 +421,10 @@ The demo was reset to a clean run afterward and `.env.local` is back to
 
 Sidebar entries Analytics / Company / Support, the top-bar search and the
 user placeholder are visibly unavailable and have no destination. There are no
-charts, no video or image panels, no upload control, no CV start button or
-camera settings, no roster CRUD, no store or shift administration, no visitor
+charts, no image uploads or camera settings, no roster CRUD, no store or shift administration, no visitor
 deletion, no account or settings screens, and no history or archive view.
+
+The local Video demo is the approved exception to the earlier no-video-controls
+scope: a fixed short sample, real start/status/arrival delivery, browser-ready
+annotated result and clearly labeled playback-only backup. It does not add
+arbitrary uploads, camera configuration, image analysis or live monitoring.
