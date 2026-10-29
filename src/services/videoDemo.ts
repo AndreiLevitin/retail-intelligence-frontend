@@ -39,6 +39,7 @@ async function request<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export const getVideoStatus = () => request<VideoDemoStatus>('/status')
+export const resetVideoDemo = () => request<VideoDemoStatus>('/reset', {})
 export async function startVideoDemo(): Promise<VideoDemoStatus> {
   if (!httpClient) throw new Error('Video arrivals require the real backend, not mock mode.')
   const board = await httpClient.getBoard()

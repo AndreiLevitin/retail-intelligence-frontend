@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '../ui/Button.tsx'
 import { boardServiceMode } from '../../services/index.ts'
-import { getVideoStatus, startVideoDemo, videoUrl } from '../../services/videoDemo.ts'
+import { getVideoStatus, resetVideoDemo, startVideoDemo, videoUrl } from '../../services/videoDemo.ts'
 import type { VideoDemoStatus } from '../../services/videoDemo.ts'
 
 const LABELS = { idle: 'Ready to process', starting: 'Loading detector', processing: 'Processing video',
@@ -11,6 +11,7 @@ export function VideoDemoPage({ active, onBoard }: { active: boolean; onBoard: (
   const [status, setStatus] = useState<VideoDemoStatus>({ phase: 'idle', logs: [], backupAvailable: false })
   const [error, setError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
+  const [resetting, setResetting] = useState(false)
   const [backup, setBackup] = useState(false)
   const generation = useRef(0)
   const source = useRef<HTMLVideoElement>(null)
@@ -40,6 +41,7 @@ export function VideoDemoPage({ active, onBoard }: { active: boolean; onBoard: (
     setStarting(true); setError(null); setBackup(false)
     try {
       const next = await startVideoDemo()
+      generation.current++
       setStatus(next)
       if (source.current) {
         source.current.currentTime = 0
@@ -47,6 +49,19 @@ export function VideoDemoPage({ active, onBoard }: { active: boolean; onBoard: (
       }
     } catch (reason) { setError((reason as Error).message) }
     finally { setStarting(false) }
+  }
+
+  async function reset() {
+    generation.current++
+    setResetting(true); setError(null)
+    try {
+      const next = await resetVideoDemo()
+      generation.current++
+      setStatus(next); setBackup(false)
+      source.current?.pause()
+      source.current?.load()
+    } catch (reason) { setError((reason as Error).message) }
+    finally { setResetting(false) }
   }
 
   const result = backup ? '/media/backup' : status.resultPath
@@ -63,9 +78,10 @@ export function VideoDemoPage({ active, onBoard }: { active: boolean; onBoard: (
       {!real && <p role="status" className="rounded-control border border-line bg-surface p-4 text-muted">Connect to the real backend to register visitors from video.</p>}
       {error && <p role="alert" className="rounded-control border border-danger/40 bg-danger-tint p-4 text-danger">{error}</p>}
       <section className="flex flex-wrap items-center gap-4 rounded-control border border-line bg-surface p-4">
-        <Button variant="primary" onClick={() => void start()} disabled={!real || busy} pending={busy}>
+        <Button variant="primary" onClick={() => void start()} disabled={!real || busy || resetting} pending={busy}>
           {busy ? 'Processing…' : status.jobId ? 'Process again' : 'Start processing'}
         </Button>
+        <Button onClick={() => void reset()} disabled={!real || busy} pending={resetting}>Reset video</Button>
         <div className="flex-1" aria-live="polite">
           <p className="font-semibold text-ink">{LABELS[status.phase]}</p>
           <p className="text-body text-muted">{status.frames ?? 0} / {status.totalFrames ?? 81} frames · {status.registered ?? 0} visitors registered</p>

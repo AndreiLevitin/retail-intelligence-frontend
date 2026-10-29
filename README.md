@@ -428,3 +428,9 @@ The local Video demo is the approved exception to the earlier no-video-controls
 scope: a fixed short sample, real start/status/arrival delivery, browser-ready
 annotated result and clearly labeled playback-only backup. It does not add
 arbitrary uploads, camera configuration, image analysis or live monitoring.
+
+**Reset video** clears the local runner's completed/failed demo state, activity,
+counter and result player, and reloads source playback at the start. It preserves
+the recorded backup and does not reset board data. It is disabled while a run
+is active. For a clean rehearsal use Reset Demo on the board, then Reset video
+on the Video demo screen. Restart the Python companion after code updates.
